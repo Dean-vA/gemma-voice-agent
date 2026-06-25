@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -81,7 +81,7 @@ async def _transcribe(samples) -> str:
     return "".join(out).strip()
 
 
-async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str):
+async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str, image_bytes: bytes | None = None):
     """Decode audio, stream a reply, update history. Yields (chunk, timer)."""
     settings = app.state.settings
     backend = app.state.backend
@@ -97,7 +97,8 @@ async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str):
 
     async def _gen():
         async for chunk in backend.stream(
-            settings.system_prompt, history, decoded.samples, instruction, settings.max_new_tokens
+            settings.system_prompt, history, decoded.samples, instruction,
+            settings.max_new_tokens, user_image=image_bytes,
         ):
             timer.mark_first_token()
             timer.add_token()  # chunk-granular; refined to token count at finish
@@ -107,15 +108,24 @@ async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str):
     return decoded, history, parts, timer, _gen
 
 
+async def _read_image(image: UploadFile | None) -> bytes | None:
+    """Read an optional image upload to bytes (None if absent/empty)."""
+    if image is None:
+        return None
+    data = await image.read()
+    return data or None
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str = Form(""),
-               transcribe: bool = Form(False)):
+               transcribe: bool = Form(False), image: UploadFile = File(None)):
     sid = session_id or uuid.uuid4().hex
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(400, "empty audio upload")
 
-    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction)
+    image_bytes = await _read_image(image)
+    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction, image_bytes)
     user_text = await _transcribe(decoded.samples) if transcribe else instruction
 
     async for _ in gen():
@@ -124,7 +134,7 @@ async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str
     reply = "".join(parts)
     metrics = timer.finish(output_tokens=_approx_tokens(reply))
 
-    history.append(Turn(role="user", text=user_text or instruction, audio=decoded.samples))
+    history.append(Turn(role="user", text=user_text or instruction, audio=decoded.samples, image=image_bytes))
     history.append(Turn(role="assistant", text=reply))
     _trim_history(history, app.state.settings.max_history_turns)
 
@@ -133,13 +143,14 @@ async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str
 
 @app.post("/chat/stream")
 async def chat_stream(audio: UploadFile, session_id: str = Form(None), instruction: str = Form(""),
-                      transcribe: bool = Form(False)):
+                      transcribe: bool = Form(False), image: UploadFile = File(None)):
     sid = session_id or uuid.uuid4().hex
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(400, "empty audio upload")
 
-    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction)
+    image_bytes = await _read_image(image)
+    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction, image_bytes)
 
     async def _sse():
         yield _event("session", {"session_id": sid})
@@ -151,7 +162,7 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
             yield _event("token", {"text": chunk})
         reply = "".join(parts)
         metrics = timer.finish(output_tokens=_approx_tokens(reply))
-        history.append(Turn(role="user", text=user_text, audio=decoded.samples))
+        history.append(Turn(role="user", text=user_text, audio=decoded.samples, image=image_bytes))
         history.append(Turn(role="assistant", text=reply))
         _trim_history(history, app.state.settings.max_history_turns)
         yield _event("done", {"reply": reply, "metrics": metrics.as_dict()})
@@ -161,7 +172,7 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
 
 @app.post("/converse")
 async def converse(audio: UploadFile, session_id: str = Form(None), instruction: str = Form(""),
-                   transcribe: bool = Form(False), engine: str = Form("")):
+                   transcribe: bool = Form(False), engine: str = Form(""), image: UploadFile = File(None)):
     """Voice loop: audio in -> Gemma streams text -> sentence-chunked TTS -> audio out.
 
     Streams SSE: `transcript` (user's words, if requested), `token` (text),
@@ -174,7 +185,8 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
     if not audio_bytes:
         raise HTTPException(400, "empty audio upload")
 
-    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction)
+    image_bytes = await _read_image(image)
+    decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction, image_bytes)
     tts: TTSClient = _pick_tts(engine)
 
     async def _sse():
@@ -211,7 +223,7 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
         metrics = timer.finish(output_tokens=_approx_tokens(reply))
         health = await tts.health()
         metrics.tts_engine = health.get("engine")
-        history.append(Turn(role="user", text=user_text, audio=decoded.samples))
+        history.append(Turn(role="user", text=user_text, audio=decoded.samples, image=image_bytes))
         history.append(Turn(role="assistant", text=reply))
         _trim_history(history, app.state.settings.max_history_turns)
         yield _event("done", {"reply": reply, "metrics": metrics.as_dict()})

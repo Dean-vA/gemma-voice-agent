@@ -61,15 +61,22 @@ Then open the console:
 http://localhost:8000
 ```
 
-> Browser mic capture needs a secure context — `localhost` qualifies, so no HTTPS
-> setup is needed for local testing.
+> Browser mic **and webcam** capture need a secure context — `localhost` qualifies,
+> so no HTTPS setup is needed for local testing.
+
+**Show the robot something (image input).** Gemma 4 E4B is multimodal, so the console
+can attach a still image to a spoken turn. Click **📷** in the control bar, **📸 Snap**
+a webcam frame, then hold-to-talk and ask about it (e.g. "what am I holding?"). The frame
+is sent with that turn only. No extra setup — the vLLM server already accepts an image
+alongside audio.
 
 ## API (what the robot will call)
 
 | Endpoint        | Purpose                                                            |
 |-----------------|-------------------------------------------------------------------|
-| `POST /chat`        | multipart `audio` (+ optional `session_id`, `instruction`) → `{reply, metrics}` |
+| `POST /chat`        | multipart `audio` (+ optional `session_id`, `instruction`, `image`) → `{reply, metrics}` |
 | `POST /chat/stream` | same input → **SSE** token stream + final metrics                 |
+| `POST /converse`    | same input (+ `engine`) → **SSE** text + sentence-chunked TTS audio |
 | `POST /reset`       | clear a session's history                                         |
 | `GET  /health`      | backend, quant mode, GPU, VRAM                                    |
 

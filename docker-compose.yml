@@ -101,6 +101,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}
     volumes:
       - hf-cache:/root/.cache/huggingface
+      - ./web:/app/web:ro     # serve the frontend live so UI edits need only a browser refresh
     ports:
       - "8000:8000"
     depends_on:

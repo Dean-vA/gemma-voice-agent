@@ -40,6 +40,13 @@
       </div>
 
       <div class="stage">
+        <div id="cam-tray" class="cam-tray" hidden>
+          <video id="cam-video" class="cam-video" autoplay playsinline muted></video>
+          <div class="cam-actions">
+            <button id="btn-snap" class="ghost">📸 Snap</button>
+            <button id="btn-cam-close" class="ghost">Close</button>
+          </div>
+        </div>
         <canvas class="wave" id="wave" width="900" height="56"></canvas>
         <div class="stage-bar">
           <button id="btn-talk" class="talk">🎙 Hold to talk <kbd>space</kbd></button>
@@ -61,6 +68,11 @@
             <span class="switch"></span>
             <span>📝 Transcribe</span>
           </label>
+          <button id="btn-cam" class="ghost cam-btn" title="Show the robot an image (webcam)">📷</button>
+          <span id="cam-chip" class="cam-chip" hidden>
+            <img id="cam-thumb" alt="attached frame" />
+            <button id="btn-cam-clear" title="Remove image">✕</button>
+          </span>
           <span id="mic-state" class="mic-state">idle</span>
         </div>
       </div>

@@ -23,6 +23,12 @@ def _audio_part(samples: np.ndarray, sample_rate: int) -> dict:
     return {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}}
 
 
+def _image_part(image_bytes: bytes) -> dict:
+    mime = "image/png" if image_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
 class VLLMBackend(ChatBackend):
     name = "vllm"
 
@@ -43,7 +49,8 @@ class VLLMBackend(ChatBackend):
             pass
 
     def _build_messages(
-        self, system_prompt: str, history: list[Turn], user_audio: np.ndarray, instruction: str
+        self, system_prompt: str, history: list[Turn], user_audio: np.ndarray,
+        instruction: str, user_image: bytes | None = None,
     ) -> list[dict]:
         sr = self.settings.sample_rate
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -52,8 +59,10 @@ class VLLMBackend(ChatBackend):
                 content: list[dict] = []
                 if turn.text:
                     content.append({"type": "text", "text": turn.text})
+                if turn.image is not None:
+                    content.append(_image_part(turn.image))  # image AFTER text
                 if turn.audio is not None:
-                    content.append(_audio_part(turn.audio, sr))  # audio AFTER text
+                    content.append(_audio_part(turn.audio, sr))  # audio last
                 messages.append({"role": "user", "content": content})
             else:
                 messages.append({"role": "assistant", "content": turn.text})
@@ -61,7 +70,9 @@ class VLLMBackend(ChatBackend):
         cur: list[dict] = []
         if instruction:
             cur.append({"type": "text", "text": instruction})
-        cur.append(_audio_part(user_audio, sr))  # audio AFTER text (Gemma 4 rule)
+        if user_image is not None:
+            cur.append(_image_part(user_image))  # image after text, before audio
+        cur.append(_audio_part(user_audio, sr))  # audio last (Gemma 4 rule)
         messages.append({"role": "user", "content": cur})
         return messages
 
@@ -72,8 +83,9 @@ class VLLMBackend(ChatBackend):
         user_audio: np.ndarray,
         instruction: str,
         max_new_tokens: int,
+        user_image: bytes | None = None,
     ) -> AsyncIterator[str]:
-        messages = self._build_messages(system_prompt, history, user_audio, instruction)
+        messages = self._build_messages(system_prompt, history, user_audio, instruction, user_image)
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,

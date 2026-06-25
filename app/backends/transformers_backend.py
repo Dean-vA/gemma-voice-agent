@@ -75,8 +75,11 @@ class TransformersBackend(ChatBackend):
         self.model.eval()
 
     def _build_messages(
-        self, system_prompt: str, history: list[Turn], audio_paths: dict[int, str], user_audio_path: str, instruction: str
+        self, system_prompt: str, history: list[Turn], audio_paths: dict[int, str],
+        user_audio_path: str, instruction: str,
+        image_paths: dict[int, str] | None = None, user_image_path: str | None = None,
     ) -> list[dict]:
+        image_paths = image_paths or {}
         messages: list[dict] = [
             {"role": "system", "content": [{"type": "text", "text": system_prompt}]}
         ]
@@ -85,14 +88,18 @@ class TransformersBackend(ChatBackend):
                 content: list[dict] = []
                 if turn.text:
                     content.append({"type": "text", "text": turn.text})
+                if idx in image_paths:
+                    content.append({"type": "image", "image": image_paths[idx]})  # image AFTER text
                 if idx in audio_paths:
-                    content.append({"type": "audio", "audio": audio_paths[idx]})  # audio AFTER text
+                    content.append({"type": "audio", "audio": audio_paths[idx]})  # audio last
                 messages.append({"role": "user", "content": content})
             else:
                 messages.append({"role": "assistant", "content": [{"type": "text", "text": turn.text}]})
 
         cur: list[dict] = [{"type": "text", "text": instruction or "Respond to the audio."}]
-        cur.append({"type": "audio", "audio": user_audio_path})  # audio AFTER text
+        if user_image_path is not None:
+            cur.append({"type": "image", "image": user_image_path})  # image after text, before audio
+        cur.append({"type": "audio", "audio": user_audio_path})  # audio last
         messages.append({"role": "user", "content": cur})
         return messages
 
@@ -103,6 +110,7 @@ class TransformersBackend(ChatBackend):
         user_audio: np.ndarray,
         instruction: str,
         max_new_tokens: int,
+        user_image: bytes | None = None,
     ) -> AsyncIterator[str]:
         import torch
         from transformers import TextIteratorStreamer
@@ -118,10 +126,23 @@ class TransformersBackend(ChatBackend):
             tmp_paths.append(path)
             return path
 
+        def _write_image(data: bytes) -> str:
+            suffix = ".png" if data[:8] == b"\x89PNG\r\n\x1a\n" else ".jpg"
+            fd, path = tempfile.mkstemp(suffix=suffix)
+            os.close(fd)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            tmp_paths.append(path)
+            return path
+
         try:
             audio_paths = {i: _write(t.audio) for i, t in enumerate(history) if t.audio is not None}
+            image_paths = {i: _write_image(t.image) for i, t in enumerate(history) if t.image is not None}
             user_path = _write(user_audio)
-            messages = self._build_messages(system_prompt, history, audio_paths, user_path, instruction)
+            user_image_path = _write_image(user_image) if user_image is not None else None
+            messages = self._build_messages(
+                system_prompt, history, audio_paths, user_path, instruction, image_paths, user_image_path
+            )
 
             inputs = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"

@@ -18,6 +18,11 @@ let captureSampleRate = 48000;
 let speechMs = 0, silenceMs = 0, sawSpeech = false;
 const sess = { turns: 0, ttftSum: 0, tpsSum: 0 };
 
+// Webcam image input: a snapped frame is held here and sent with the next turn.
+let pendingImage = null;     // Blob (JPEG) or null
+let camStream = null;        // active MediaStream while the preview is open
+const CAM_MAX_DIM = 768;     // downscale longest side; Gemma sees ~768px anyway
+
 const $ = (id) => document.getElementById(id);
 
 // ---------- health ----------
@@ -47,7 +52,7 @@ async function refreshEngines() {
     sel.innerHTML = "";
     if (!usable.length) {
       sel.innerHTML = '<option value="">— no voices —</option>';
-      return;
+      return false;
     }
     for (const e of usable) {
       const o = document.createElement("option");
@@ -57,7 +62,8 @@ async function refreshEngines() {
     }
     sel.value = usable.some((e) => e.name === prev) ? prev
       : (usable.some((e) => e.name === data.default) ? data.default : usable[0].name);
-  } catch { /* leave as-is */ }
+    return true;
+  } catch { /* leave as-is */ return false; }
 }
 function setBadge(id, k, v) { $(id).innerHTML = `${k} <b>${v}</b>`; }
 function shortGpu(name) { return (name || "").replace("NVIDIA GeForce ", "").replace("NVIDIA ", "") || "gpu"; }
@@ -215,8 +221,10 @@ function attachReplay(el, blobs) {
 let curUser = null, curAssistant = null, curAudio = [];
 async function sendAudio(wavBlob) {
   $("empty")?.remove();
+  const sentImage = pendingImage;                // capture before the one-shot clear
   curUser = addMessage("user", "🎤 spoken audio");
   attachReplay(curUser, [wavBlob]);              // replay your own speech
+  if (sentImage) addImageToMsg(curUser, sentImage);
   curAssistant = addMessage("assistant", "");
   curAudio = [];
 
@@ -226,6 +234,7 @@ async function sendAudio(wavBlob) {
   form.append("instruction", $("instruction").value || "");
   form.append("transcribe", $("toggle-transcribe").checked ? "true" : "false");
   form.append("engine", $("tts-select").value || "");
+  if (sentImage) { form.append("image", sentImage, "frame.jpg"); clearImage(); }
 
   const endpoint = $("toggle-speak").checked ? "/converse" : "/chat/stream";
   const resp = await fetch(endpoint, { method: "POST", body: form });
@@ -269,6 +278,50 @@ function addMessage(role, text) {
   return el;
 }
 function scrollDown() { const t = $("transcript"); t.scrollTop = t.scrollHeight; }
+
+// ---------- webcam image input ----------
+async function openCam() {
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+    $("cam-video").srcObject = camStream;
+    $("cam-tray").hidden = false;
+  } catch {
+    setMic("no camera", false);
+  }
+}
+function closeCam() {
+  if (camStream) { camStream.getTracks().forEach((t) => t.stop()); camStream = null; }
+  $("cam-tray").hidden = true;
+}
+function snap() {
+  const v = $("cam-video");
+  if (!v.videoWidth) return;
+  const scale = Math.min(1, CAM_MAX_DIM / Math.max(v.videoWidth, v.videoHeight));
+  const w = Math.round(v.videoWidth * scale), h = Math.round(v.videoHeight * scale);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  c.getContext("2d").drawImage(v, 0, 0, w, h);
+  c.toBlob((blob) => {
+    pendingImage = blob;
+    const thumb = $("cam-thumb");
+    if (thumb.dataset.url) URL.revokeObjectURL(thumb.dataset.url);
+    const url = URL.createObjectURL(blob);
+    thumb.src = url; thumb.dataset.url = url;
+    $("cam-chip").hidden = false;
+    closeCam();                                  // free the camera once we have a frame
+  }, "image/jpeg", 0.85);
+}
+function clearImage() {
+  pendingImage = null;
+  const thumb = $("cam-thumb");
+  if (thumb.dataset.url) { URL.revokeObjectURL(thumb.dataset.url); delete thumb.dataset.url; }
+  $("cam-chip").hidden = true;
+}
+function addImageToMsg(el, blob) {
+  const img = document.createElement("img");
+  img.className = "msg-img";
+  img.src = URL.createObjectURL(blob);     // own URL, independent of the chip thumbnail
+  el.appendChild(img);                     // sibling of .body, so a transcript update can't wipe it
+}
 
 function updateMetrics(m) {
   const ms = (v) => (v == null ? "—" : `${v.toFixed(0)} ms`);
@@ -326,8 +379,14 @@ vad.addEventListener("change", async (e) => {
   }
 });
 
+$("btn-cam").addEventListener("click", () => ($("cam-tray").hidden ? openCam() : closeCam()));
+$("btn-snap").addEventListener("click", snap);
+$("btn-cam-close").addEventListener("click", closeCam);
+$("btn-cam-clear").addEventListener("click", clearImage);
+
 $("btn-reset").addEventListener("click", async () => {
   if (sessionId) { const f = new FormData(); f.append("session_id", sessionId); await fetch("/reset", { method: "POST", body: f }); }
+  clearImage(); closeCam();
   sessionId = null;
   $("session-id").textContent = "no session";
   $("transcript").innerHTML = `<div class="empty" id="empty"><span class="mark">◍</span>Hold the button (or <kbd>space</kbd>) and speak. The robot brain replies in text, latency on the right.</div>`;
@@ -340,3 +399,14 @@ sizeCanvas();
 drawWave();
 refreshHealth();
 setInterval(refreshHealth, 15000);
+
+// TTS engines load their model on container start, so they're unreachable for
+// the first few seconds after this page loads. Poll quickly until at least one
+// voice appears, then fall back to the 15s health cadence — otherwise the
+// dropdown sits on "— no voices —" until the first message happens to warm it.
+(async function waitForVoices() {
+  for (let i = 0; i < 40; i++) {          // ~60s ceiling for a cold start
+    if (await refreshEngines()) return;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+})();

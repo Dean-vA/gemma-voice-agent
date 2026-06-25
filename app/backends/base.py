@@ -13,12 +13,14 @@ class Turn:
     """One conversation turn.
 
     ``audio`` carries the user's spoken input (mono float32 at the configured
-    sample rate). Assistant turns carry ``text`` only.
+    sample rate). ``image`` carries an optional encoded still (JPEG/PNG bytes)
+    the user showed the robot. Assistant turns carry ``text`` only.
     """
 
     role: str  # "user" | "assistant"
     text: str = ""
     audio: np.ndarray | None = None
+    image: bytes | None = None
 
 
 class ChatBackend(abc.ABC):
@@ -42,8 +44,13 @@ class ChatBackend(abc.ABC):
         user_audio: np.ndarray,
         instruction: str,
         max_new_tokens: int,
+        user_image: bytes | None = None,
     ) -> AsyncIterator[str]:
-        """Yield response text chunks as they are generated."""
+        """Yield response text chunks as they are generated.
+
+        ``user_image`` is optional encoded image bytes (JPEG/PNG) shown with the
+        current turn; placed before audio in the prompt.
+        """
         raise NotImplementedError
         yield ""  # pragma: no cover  (makes this an async generator)
 

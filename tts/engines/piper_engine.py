@@ -26,8 +26,10 @@ class PiperEngine(TTSEngine):
 
     def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
         pcm = bytearray()
-        for chunk in self._voice.synthesize_stream_raw(text):
-            pcm.extend(chunk)  # int16 little-endian
+        # piper-tts 1.3+ yields AudioChunk objects from synthesize();
+        # .audio_int16_bytes is raw int16 little-endian PCM.
+        for chunk in self._voice.synthesize(text):
+            pcm.extend(chunk.audio_int16_bytes)
         samples = np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
         if samples.size == 0:
             samples = np.zeros(1, dtype=np.float32)
