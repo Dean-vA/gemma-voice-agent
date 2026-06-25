@@ -25,7 +25,7 @@ x-gpu: &gpu
       reservations:
         devices:
           - driver: nvidia
-            device_ids: ['4']   # pin to GPU index 4 (nvidia-smi order). Use a
+            device_ids: ['3']   # pin to GPU index 3 (nvidia-smi order). Use a
             capabilities: [gpu]  # UUID here instead for stability across reboots.
 
 services:
