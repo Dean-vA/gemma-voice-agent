@@ -1,0 +1,112 @@
+# Portainer Stack (Git-based) — Gemma 4 E4B voice agent, vLLM low-latency path.
+#
+# Deploy: Stacks > Add stack > Repository. Point it at your repo + branch, set
+# "Compose path" to this file. Portainer checks out the source and builds on the
+# host, so the build: contexts resolve. Target a Docker STANDALONE environment
+# with NVIDIA GPU support (nvidia-container-toolkit).
+#
+# Differences from the repo's docker-compose.yml, and why:
+#   - profiles removed     -> services with a profiles: key silently don't deploy
+#                             in Portainer 2.24+ ("no service selected").
+#   - env_file: .env gone  -> .env is gitignored, so a fresh checkout has none;
+#                             config is passed explicitly below instead.
+#   - one TTS engine        -> kokoro only; add piper/xtts as extra services if needed.
+#
+# Set in Portainer's "Environment variables" panel:
+#   HF_TOKEN          (required — Gemma repos are gated)
+#   QAT_MODEL_ID      (optional)
+#   SYSTEM_PROMPT     (optional)
+#   MAX_NEW_TOKENS    (optional)
+#   MAX_HISTORY_TURNS (optional)
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ['4']   # pin to GPU index 4 (nvidia-smi order). Use a
+            capabilities: [gpu]  # UUID here instead for stability across reboots.
+
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: vllm.Dockerfile
+    image: gemma-vllm-audio:latest
+    <<: *gpu
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    # Uncomment to reach vLLM's OpenAI API directly from outside:
+    # ports:
+    #   - "2731:8001"
+    command: >
+      --model ${QAT_MODEL_ID:-google/gemma-4-E4B-it-qat-w4a16-ct}
+      --served-model-name gemma-4-e4b
+      --port 8001
+      --max-model-len 8192
+      --max-num-seqs 8
+      --gpu-memory-utilization 0.85
+      --enable-prefix-caching
+      --async-scheduling
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 600s   # first run downloads the model
+
+  tts-kokoro:
+    build:
+      context: .
+      dockerfile: tts.Dockerfile
+      args:
+        TTS_ENGINE: kokoro
+    image: gemma-tts-kokoro:latest
+    <<: *gpu
+    environment:
+      - TTS_ENGINE=kokoro
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    # Uncomment to hit the TTS service directly from outside:
+    # ports:
+    #   - "2732:8200"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gemma-gateway:latest
+    <<: *gpu
+    environment:
+      # config.py (pydantic-settings) reads these from the process environment.
+      - BACKEND=vllm
+      - VLLM_BASE_URL=http://vllm:8001/v1
+      - HF_TOKEN=${HF_TOKEN}
+      - QAT_MODEL_ID=${QAT_MODEL_ID:-google/gemma-4-E4B-it-qat-w4a16-ct}
+      - TTS_ENGINE=kokoro
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
+      - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-8}
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a friendly humanoid robot assistant. Reply in short, natural spoken sentences. Be concise and conversational.}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - ./web:/app/web:ro   # live UI edits; valid here because the Git checkout has ./web
+    ports:
+      - "2730:8000"        # external: http://<host>:2730
+    depends_on:
+      vllm:
+        condition: service_healthy
+      tts-kokoro:
+        condition: service_healthy
+
+volumes:
+  hf-cache:
