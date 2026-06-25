@@ -99,7 +99,9 @@ services:
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a friendly humanoid robot assistant. Reply in short, natural spoken sentences. Be concise and conversational.}
     volumes:
       - hf-cache:/root/.cache/huggingface
-      - ./web:/app/web:ro   # live UI edits; valid here because the Git checkout has ./web
+      # NOTE: no ./web bind mount. The UI is baked into the image at /app/web by
+      # the Dockerfile (COPY web ./web). A relative bind here would shadow it
+      # with an empty dir in a web-editor stack -> /app/web/index.html missing.
     ports:
       - "2730:8000"        # external: http://<host>:2730
     depends_on:
