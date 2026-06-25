@@ -18,9 +18,8 @@ let captureSampleRate = 48000;
 let speechMs = 0, silenceMs = 0, sawSpeech = false;
 const sess = { turns: 0, ttftSum: 0, tpsSum: 0 };
 
-// Webcam image input: a snapped frame is held here and sent with the next turn.
-let pendingImage = null;     // Blob (JPEG) or null
-let camStream = null;        // active MediaStream while the preview is open
+// Webcam image input: when "Vision" is on, one frame is grabbed per spoken turn.
+let camStream = null;        // active MediaStream while Vision is on
 const CAM_MAX_DIM = 768;     // downscale longest side; Gemma sees ~768px anyway
 
 const $ = (id) => document.getElementById(id);
@@ -221,7 +220,8 @@ function attachReplay(el, blobs) {
 let curUser = null, curAssistant = null, curAudio = [];
 async function sendAudio(wavBlob) {
   $("empty")?.remove();
-  const sentImage = pendingImage;                // capture before the one-shot clear
+  // Vision on -> grab one webcam frame for this turn.
+  const sentImage = $("toggle-vision").checked ? await captureFrame() : null;
   curUser = addMessage("user", "🎤 spoken audio");
   attachReplay(curUser, [wavBlob]);              // replay your own speech
   if (sentImage) addImageToMsg(curUser, sentImage);
@@ -234,7 +234,7 @@ async function sendAudio(wavBlob) {
   form.append("instruction", $("instruction").value || "");
   form.append("transcribe", $("toggle-transcribe").checked ? "true" : "false");
   form.append("engine", $("tts-select").value || "");
-  if (sentImage) { form.append("image", sentImage, "frame.jpg"); clearImage(); }
+  if (sentImage) form.append("image", sentImage, "frame.jpg");
 
   const endpoint = $("toggle-speak").checked ? "/converse" : "/chat/stream";
   const resp = await fetch(endpoint, { method: "POST", body: form });
@@ -281,40 +281,60 @@ function scrollDown() { const t = $("transcript"); t.scrollTop = t.scrollHeight;
 
 // ---------- webcam image input ----------
 async function openCam() {
+  const v = $("cam-video");
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
-    $("cam-video").srcObject = camStream;
+    if (!navigator.mediaDevices?.getUserMedia)
+      throw new Error("getUserMedia unavailable (needs https or localhost)");
+    camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    v.srcObject = camStream;
     $("cam-tray").hidden = false;
-  } catch {
+    setMic("camera…", true);
+
+    const track = camStream.getVideoTracks()[0];
+    console.log("[cam] device:", track?.label, "| state:", track?.readyState,
+                "| muted:", track?.muted, "| settings:", track?.getSettings?.());
+    navigator.mediaDevices.enumerateDevices().then((d) =>
+      console.log("[cam] video inputs:", d.filter((x) => x.kind === "videoinput").map((x) => x.label || "(unnamed)"))
+    ).catch(() => {});
+
+    v.onplaying = () => setMic(`live ${v.videoWidth}×${v.videoHeight}`, true);
+    if (track) track.onmute = () => setMic("camera muted (in use?)", false);
+    await v.play().catch((e) => console.warn("[cam] play() failed:", e));
+
+    // Watchdog: granted but no frames within 2.5s -> device isn't delivering video.
+    setTimeout(() => {
+      if (camStream && !v.videoWidth) {
+        setMic("no frames — covered/in use?", false);
+        console.warn("[cam] no frames after 2.5s. muted:", track?.muted,
+          "readyState:", track?.readyState,
+          "→ test the Windows Camera app; check privacy settings + other apps holding the camera.");
+      }
+    }, 2500);
+  } catch (e) {
+    closeCam();
+    $("toggle-vision").checked = false;          // reflect the failure on the toggle
     setMic("no camera", false);
+    console.error("[cam] getUserMedia failed:", e);
+    alert("Webcam error: " + (e.message || e) +
+      "\n\nCheck the camera permission (icon in the address bar) and that no other app " +
+      "(Teams / Zoom / OBS / Camera) is holding the camera.");
   }
 }
 function closeCam() {
   if (camStream) { camStream.getTracks().forEach((t) => t.stop()); camStream = null; }
   $("cam-tray").hidden = true;
 }
-function snap() {
-  const v = $("cam-video");
-  if (!v.videoWidth) return;
-  const scale = Math.min(1, CAM_MAX_DIM / Math.max(v.videoWidth, v.videoHeight));
-  const w = Math.round(v.videoWidth * scale), h = Math.round(v.videoHeight * scale);
-  const c = document.createElement("canvas"); c.width = w; c.height = h;
-  c.getContext("2d").drawImage(v, 0, 0, w, h);
-  c.toBlob((blob) => {
-    pendingImage = blob;
-    const thumb = $("cam-thumb");
-    if (thumb.dataset.url) URL.revokeObjectURL(thumb.dataset.url);
-    const url = URL.createObjectURL(blob);
-    thumb.src = url; thumb.dataset.url = url;
-    $("cam-chip").hidden = false;
-    closeCam();                                  // free the camera once we have a frame
-  }, "image/jpeg", 0.85);
-}
-function clearImage() {
-  pendingImage = null;
-  const thumb = $("cam-thumb");
-  if (thumb.dataset.url) { URL.revokeObjectURL(thumb.dataset.url); delete thumb.dataset.url; }
-  $("cam-chip").hidden = true;
+// Grab one JPEG frame from the live preview; resolves null if no frame is available.
+function captureFrame() {
+  return new Promise((resolve) => {
+    const v = $("cam-video");
+    if (!camStream || !v.videoWidth || !v.videoHeight) { resolve(null); return; }
+    const scale = Math.min(1, CAM_MAX_DIM / Math.max(v.videoWidth, v.videoHeight));
+    const w = Math.round(v.videoWidth * scale), h = Math.round(v.videoHeight * scale);
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(v, 0, 0, w, h);
+    c.toBlob((b) => resolve(b), "image/jpeg", 0.85);
+  });
 }
 function addImageToMsg(el, blob) {
   const img = document.createElement("img");
@@ -379,14 +399,11 @@ vad.addEventListener("change", async (e) => {
   }
 });
 
-$("btn-cam").addEventListener("click", () => ($("cam-tray").hidden ? openCam() : closeCam()));
-$("btn-snap").addEventListener("click", snap);
-$("btn-cam-close").addEventListener("click", closeCam);
-$("btn-cam-clear").addEventListener("click", clearImage);
+$("toggle-vision").addEventListener("change", (e) => { e.target.checked ? openCam() : closeCam(); });
 
 $("btn-reset").addEventListener("click", async () => {
   if (sessionId) { const f = new FormData(); f.append("session_id", sessionId); await fetch("/reset", { method: "POST", body: f }); }
-  clearImage(); closeCam();
+  closeCam(); $("toggle-vision").checked = false;
   sessionId = null;
   $("session-id").textContent = "no session";
   $("transcript").innerHTML = `<div class="empty" id="empty"><span class="mark">◍</span>Hold the button (or <kbd>space</kbd>) and speak. The robot brain replies in text, latency on the right.</div>`;
