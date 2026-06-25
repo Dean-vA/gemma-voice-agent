@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gemma 4 E4B · Voice Console</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="status-dot"></span>
+      <h1>Gemma&nbsp;4&nbsp;E4B <span class="sub">· voice console</span></h1>
+    </div>
+    <div class="badges">
+      <span class="badge" id="badge-backend">backend <b>—</b></span>
+      <span class="badge" id="badge-quant">quant <b>—</b></span>
+      <span class="badge" id="badge-gpu">gpu <b>—</b></span>
+      <span class="badge" id="badge-tts">tts <b>—</b></span>
+    </div>
+  </header>
+
+  <main>
+    <!-- conversation -->
+    <section class="panel conversation">
+      <div class="panel-head">
+        <h2>Conversation</h2>
+        <div class="session">
+          <code id="session-id">no session</code>
+          <button id="btn-reset" class="ghost">Reset</button>
+        </div>
+      </div>
+
+      <div id="transcript" class="transcript">
+        <div class="empty" id="empty">
+          <span class="mark">◍</span>
+          Hold the button (or <kbd>space</kbd>) and speak.
+          The robot brain replies in text, latency on the right.
+        </div>
+      </div>
+
+      <div class="stage">
+        <canvas class="wave" id="wave" width="900" height="56"></canvas>
+        <div class="stage-bar">
+          <button id="btn-talk" class="talk">🎙 Hold to talk <kbd>space</kbd></button>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-vad" />
+            <span class="switch"></span>
+            <span>Continuous</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-speak" checked />
+            <span class="switch"></span>
+            <span>🔊 Speak</span>
+          </label>
+          <select id="tts-select" class="tts-select" title="TTS engine">
+            <option value="">— no voices —</option>
+          </select>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-transcribe" checked />
+            <span class="switch"></span>
+            <span>📝 Transcribe</span>
+          </label>
+          <span id="mic-state" class="mic-state">idle</span>
+        </div>
+      </div>
+      <input id="instruction" class="instruction" type="text"
+             placeholder="Optional text steer sent with the audio (e.g. 'answer in one sentence')" />
+    </section>
+
+    <!-- instrument rail -->
+    <aside class="panel rail">
+      <div class="readout">
+        <div class="top">
+          <span class="name">Time to first token</span>
+          <span class="verdict" id="ttft-verdict"></span>
+        </div>
+        <div style="margin-top:8px">
+          <span class="num" id="m-ttft">—<span class="u">ms</span></span>
+        </div>
+        <div class="gauge">
+          <div class="gauge-track"><div class="gauge-marker" id="gauge-marker"></div></div>
+          <div class="gauge-scale"><span>0</span><span>300 · snappy</span><span>800</span><span>1.5s</span></div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="grid">
+        <div class="cell"><div class="k">tokens / sec</div><div class="v accent" id="m-tps">—</div></div>
+        <div class="cell"><div class="k">total</div><div class="v" id="m-total">—</div></div>
+        <div class="cell"><div class="k">preprocess</div><div class="v" id="m-pre">—</div></div>
+        <div class="cell"><div class="k">audio in</div><div class="v" id="m-audio">—</div></div>
+        <div class="cell"><div class="k">out tokens</div><div class="v" id="m-tokens">—</div></div>
+        <div class="cell"><div class="k">1st audio</div><div class="v accent" id="m-audio1">—</div></div>
+      </div>
+
+      <div class="sect">Session</div>
+      <div class="sess-row"><span class="k">turns</span><span class="v" id="m-turns">0</span></div>
+      <div class="sess-row"><span class="k">avg TTFT</span><span class="v" id="m-avg-ttft">—</span></div>
+      <div class="sess-row"><span class="k">avg tok/s</span><span class="v" id="m-avg-tps">—</span></div>
+    </aside>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

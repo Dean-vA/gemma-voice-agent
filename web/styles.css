@@ -1,0 +1,255 @@
+/* Gemma 4 E4B voice console — lab-instrument aesthetic.
+   Color: committed dark, tinted toward blue-violet; warm coral "transmit"
+   signal for live states, cool cyan for measurements. OKLCH throughout. */
+
+:root {
+  --bg:        oklch(0.165 0.018 274);
+  --surface:   oklch(0.205 0.021 274);
+  --surface-2: oklch(0.245 0.023 274);
+  --line:      oklch(0.305 0.020 274);
+  --line-soft: oklch(0.265 0.018 274);
+
+  --text:      oklch(0.955 0.008 274);
+  --muted:     oklch(0.685 0.020 274);
+  --faint:     oklch(0.520 0.018 274);
+
+  --signal:     oklch(0.730 0.175 42);    /* transmit / live / recording */
+  --signal-dim: oklch(0.450 0.110 42);
+  --data:       oklch(0.835 0.115 196);   /* measurements */
+  --data-dim:   oklch(0.480 0.070 196);
+
+  --good: oklch(0.800 0.155 152);
+  --warn: oklch(0.820 0.145 82);
+  --bad:  oklch(0.660 0.200 27);
+
+  --r: 14px;
+  --r-sm: 9px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);  /* ease-out-expo-ish */
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--text);
+  background:
+    radial-gradient(1200px 600px at 78% -10%, oklch(0.235 0.045 274 / 0.55), transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, oklch(0.225 0.05 42 / 0.18), transparent 55%),
+    var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- top bar ---------- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand h1 {
+  font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.01em;
+}
+.brand .sub { color: var(--faint); font-weight: 400; }
+
+.dot {
+  position: relative; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--faint); transition: background 0.3s var(--ease);
+}
+.dot.ok  { background: var(--good); }
+.dot.err { background: var(--bad); }
+.dot.ok::after {
+  content: ""; position: absolute; inset: -5px; border-radius: 50%;
+  border: 1px solid var(--good); opacity: 0.5; animation: ping 2.4s var(--ease) infinite;
+}
+@keyframes ping { 0% { transform: scale(0.6); opacity: 0.6; } 100% { transform: scale(1.8); opacity: 0; } }
+
+.badges { display: flex; gap: 8px; }
+.badge {
+  font-family: var(--mono); font-size: 11px; padding: 5px 11px; border-radius: 999px;
+  background: var(--surface); color: var(--muted); border: 1px solid var(--line-soft);
+  letter-spacing: 0.02em;
+}
+.badge b { color: var(--data); font-weight: 600; }
+
+/* ---------- layout ---------- */
+main {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 1fr 340px; gap: 18px;
+  padding: 18px;
+}
+
+.panel {
+  background: linear-gradient(180deg, var(--surface), oklch(0.19 0.02 274));
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 18px;
+  display: flex; flex-direction: column; min-height: 0;
+}
+
+.panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.panel-head h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--faint); margin: 0; font-weight: 600;
+}
+.session { display: flex; align-items: center; gap: 10px; }
+.session code { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* ---------- transcript ---------- */
+.transcript { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 6px; }
+.transcript::-webkit-scrollbar { width: 8px; }
+.transcript::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+
+.empty {
+  margin: auto; text-align: center; color: var(--faint); max-width: 280px; line-height: 1.5;
+}
+.empty .mark { font-size: 30px; opacity: 0.5; display: block; margin-bottom: 10px; }
+
+.msg {
+  padding: 11px 15px; border-radius: var(--r-sm); max-width: 82%; line-height: 1.5;
+  white-space: pre-wrap; font-size: 14px; animation: rise 0.4s var(--ease) both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.msg .who {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  opacity: 0.65; display: flex; align-items: center; gap: 8px; margin-bottom: 3px;
+}
+.replay {
+  font-size: 10px; line-height: 1; padding: 2px 7px; border-radius: 999px; cursor: pointer;
+  background: transparent; border: 1px solid currentColor; color: inherit; opacity: 0.85;
+}
+.replay:hover { opacity: 1; }
+.msg.user {
+  align-self: flex-end; color: oklch(0.2 0.02 42);
+  background: linear-gradient(180deg, var(--signal), oklch(0.66 0.16 38));
+}
+.msg.user .who { color: oklch(0.28 0.04 42); opacity: 0.8; }
+.msg.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--line-soft); }
+.msg.assistant .body::after {
+  content: "▍"; color: var(--data); margin-left: 1px; animation: blink 1s steps(2) infinite;
+}
+.msg.assistant.done .body::after { content: none; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---------- capture stage ---------- */
+.stage {
+  margin-top: 14px; border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+  background: oklch(0.18 0.02 274); overflow: hidden;
+}
+.wave { display: block; width: 100%; height: 56px; }
+.stage-bar {
+  display: flex; align-items: center; gap: 14px; padding: 12px 14px;
+  border-top: 1px solid var(--line-soft);
+}
+.talk {
+  flex: 1; padding: 14px; font-size: 14px; font-weight: 600; font-family: var(--sans);
+  color: oklch(0.18 0.02 42);
+  background: linear-gradient(180deg, var(--signal), oklch(0.67 0.16 38));
+  border: none; border-radius: var(--r-sm); cursor: pointer; user-select: none;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: transform 0.08s var(--ease), filter 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  box-shadow: 0 1px 0 oklch(0.8 0.16 50 / 0.4) inset, 0 6px 18px oklch(0.66 0.16 42 / 0.25);
+}
+.talk:hover { filter: brightness(1.06); }
+.talk:active, .talk.recording { transform: translateY(1px) scale(0.995); }
+.talk.recording {
+  background: linear-gradient(180deg, oklch(0.7 0.2 28), oklch(0.6 0.2 25)); color: oklch(0.97 0.02 28);
+  box-shadow: 0 0 0 1px oklch(0.7 0.2 28 / 0.5), 0 0 24px oklch(0.66 0.2 28 / 0.45);
+}
+.talk:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+.talk kbd {
+  font-family: var(--mono); background: oklch(0.2 0.02 42 / 0.25); border-radius: 4px;
+  padding: 1px 6px; font-size: 11px;
+}
+
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+.toggle input { position: absolute; opacity: 0; }
+.switch {
+  width: 34px; height: 19px; border-radius: 999px; background: var(--line);
+  position: relative; transition: background 0.25s var(--ease); flex: none;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+  border-radius: 50%; background: var(--text); transition: transform 0.25s var(--ease);
+}
+.toggle input:checked + .switch { background: var(--signal-dim); }
+.toggle input:checked + .switch::after { transform: translateX(15px); background: var(--signal); }
+
+.tts-select {
+  font-family: var(--mono); font-size: 12px; padding: 6px 8px; border-radius: var(--r-sm);
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--line);
+  cursor: pointer;
+}
+.tts-select:focus { outline: none; border-color: var(--data-dim); }
+
+.mic-state { font-family: var(--mono); font-size: 11px; color: var(--faint); min-width: 78px; text-align: right; }
+.mic-state.live { color: var(--signal); }
+
+.instruction {
+  margin-top: 11px; padding: 10px 13px; border-radius: var(--r-sm); width: 100%;
+  background: oklch(0.18 0.02 274); border: 1px solid var(--line-soft); color: var(--text);
+  font-size: 13px; font-family: var(--sans); transition: border-color 0.2s var(--ease);
+}
+.instruction:focus { outline: none; border-color: var(--data-dim); }
+.instruction::placeholder { color: var(--faint); }
+
+/* ---------- instrument rail ---------- */
+.rail { gap: 0; }
+
+.readout { padding: 4px 2px 16px; }
+.readout .top { display: flex; align-items: baseline; justify-content: space-between; }
+.readout .name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--faint); }
+.readout .num { font-family: var(--mono); font-size: 40px; font-weight: 600; line-height: 1; color: var(--data); font-variant-numeric: tabular-nums; }
+.readout .num .u { font-size: 15px; color: var(--faint); margin-left: 3px; }
+.readout .verdict { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 999px; }
+.v-good { color: var(--good); background: oklch(0.8 0.15 152 / 0.12); }
+.v-warn { color: var(--warn); background: oklch(0.82 0.14 82 / 0.12); }
+.v-bad  { color: var(--bad);  background: oklch(0.66 0.2 27 / 0.14); }
+
+/* TTFT-vs-budget gauge */
+.gauge { margin-top: 14px; }
+.gauge-track {
+  position: relative; height: 8px; border-radius: 999px; overflow: hidden;
+  background: linear-gradient(90deg,
+    oklch(0.8 0.15 152 / 0.35) 0 20%,
+    oklch(0.82 0.14 82 / 0.32) 20% 53%,
+    oklch(0.66 0.2 27 / 0.30) 53% 100%);
+}
+.gauge-marker {
+  position: absolute; top: -3px; width: 3px; height: 14px; border-radius: 2px;
+  background: var(--text); left: 0; transition: left 0.5s var(--ease);
+  box-shadow: 0 0 6px oklch(0.95 0 0 / 0.5);
+}
+.gauge-scale { display: flex; justify-content: space-between; margin-top: 6px; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+
+.divider { height: 1px; background: var(--line-soft); margin: 4px 0 14px; }
+
+/* secondary metrics: two-column mono readout, not a card grid */
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: var(--r-sm); overflow: hidden; }
+.cell { background: var(--surface); padding: 11px 12px; }
+.cell .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+.cell .v { font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; margin-top: 3px; }
+.cell .v.accent { color: var(--data); }
+
+.sect { font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--faint); font-weight: 600; margin: 18px 0 10px; }
+.sess-row { display: flex; justify-content: space-between; padding: 8px 2px; border-bottom: 1px solid var(--line-soft); }
+.sess-row:last-child { border-bottom: none; }
+.sess-row .k { color: var(--muted); font-size: 13px; }
+.sess-row .v { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+button.ghost {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: var(--r-sm); padding: 5px 11px; cursor: pointer; font-size: 12px;
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+button.ghost:hover { color: var(--text); border-color: var(--signal-dim); }
+
+@media (max-width: 880px) {
+  main { grid-template-columns: 1fr; }
+  .rail { order: -1; }
+}

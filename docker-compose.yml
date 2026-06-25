@@ -1,0 +1,115 @@
+# Profiles:
+#   --profile vllm          -> vllm + gateway + kokoro TTS (BACKEND=vllm) [low latency]
+#   --profile transformers  -> gateway + kokoro TTS        (BACKEND=transformers)
+#   add --profile piper | xtts | chatterbox to run extra TTS engines (UI selectable)
+#   --profile voice          -> all four TTS engines at once
+#
+# All share the huggingface cache volume so models download once.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+# Shared definition for a TTS engine container (one engine each, port 8200 inside).
+x-tts: &tts
+  <<: *gpu
+  environment:
+    - HF_TOKEN=${HF_TOKEN}
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 20
+    start_period: 300s
+
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: vllm.Dockerfile
+    image: gemma-vllm-audio:latest
+    profiles: ["vllm"]
+    <<: *gpu
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8001:8001"
+    # Single-GPU low-latency flags for Gemma 4 E4B (audio-native).
+    command: >
+      --model ${QAT_MODEL_ID:-google/gemma-4-E4B-it-qat-w4a16-ct}
+      --served-model-name gemma-4-e4b
+      --port 8001
+      --max-model-len 8192
+      --max-num-seqs 8
+      --gpu-memory-utilization 0.85
+      --enable-prefix-caching
+      --async-scheduling
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 600s   # first run downloads the model
+
+  tts-kokoro:
+    <<: *tts
+    build: { context: ., dockerfile: tts.Dockerfile, args: { TTS_ENGINE: kokoro } }
+    image: gemma-tts-kokoro:latest
+    environment: [TTS_ENGINE=kokoro, "HF_TOKEN=${HF_TOKEN}"]
+    profiles: ["vllm", "transformers", "voice", "kokoro"]
+    ports: ["8200:8200"]
+
+  tts-piper:
+    <<: *tts
+    build: { context: ., dockerfile: tts.Dockerfile, args: { TTS_ENGINE: piper } }
+    image: gemma-tts-piper:latest
+    environment: [TTS_ENGINE=piper, "HF_TOKEN=${HF_TOKEN}"]
+    profiles: ["voice", "piper"]
+    ports: ["8201:8200"]
+
+  tts-xtts:
+    <<: *tts
+    build: { context: ., dockerfile: tts.Dockerfile, args: { TTS_ENGINE: xtts } }
+    image: gemma-tts-xtts:latest
+    environment: [TTS_ENGINE=xtts, "HF_TOKEN=${HF_TOKEN}"]
+    profiles: ["voice", "xtts"]
+    ports: ["8202:8200"]
+
+  tts-chatterbox:
+    <<: *tts
+    build: { context: ., dockerfile: tts.Dockerfile, args: { TTS_ENGINE: chatterbox } }
+    image: gemma-tts-chatterbox:latest
+    environment: [TTS_ENGINE=chatterbox, "HF_TOKEN=${HF_TOKEN}"]
+    profiles: ["voice", "chatterbox"]
+    ports: ["8203:8200"]
+
+  gateway:
+    build: .
+    <<: *gpu
+    env_file: .env
+    environment:
+      - VLLM_BASE_URL=http://vllm:8001/v1
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    depends_on:
+      vllm:
+        condition: service_healthy
+        required: false
+      tts-kokoro:
+        condition: service_healthy
+        required: false
+
+volumes:
+  hf-cache:

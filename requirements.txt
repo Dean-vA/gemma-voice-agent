@@ -1,0 +1,24 @@
+# Gateway runtime deps (the Transformers backend loads the model in-process;
+# the vLLM backend only needs the OpenAI client to talk to the vllm service).
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart>=0.0.12
+pydantic>=2.9
+pydantic-settings>=2.6
+
+# vLLM backend client + TTS service client
+openai>=1.55
+httpx>=0.27
+
+# Transformers backend (audio-native Gemma 4 E4B)
+# transformers is pinned loose because Gemma 4 needs a very recent release;
+# the Dockerfile upgrades it explicitly.
+transformers>=4.57
+accelerate>=1.1
+bitsandbytes>=0.45
+compressed-tensors>=0.8
+
+# Audio decode / resample
+librosa>=0.10
+soundfile>=0.12
+numpy>=1.26
