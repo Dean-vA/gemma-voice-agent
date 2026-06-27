@@ -72,13 +72,21 @@ _ASR_INSTRUCTION = (
 )
 
 
-async def _transcribe(samples) -> str:
+async def _transcribe(samples, timer: TurnTimer | None = None) -> str:
     backend = app.state.backend
     settings = app.state.settings
-    out: list[str] = []
-    async for chunk in backend.stream(_ASR_SYSTEM, [], samples, _ASR_INSTRUCTION, max(64, settings.max_new_tokens)):
-        out.append(chunk)
-    return "".join(out).strip()
+
+    async def _run() -> str:
+        out: list[str] = []
+        async for chunk in backend.stream(_ASR_SYSTEM, [], samples, _ASR_INSTRUCTION, max(64, settings.max_new_tokens)):
+            out.append(chunk)
+        return "".join(out).strip()
+
+    if timer is None:
+        return await _run()
+    # The transcription pass is a separate LLM call; time it as its own component.
+    async with timer.record_async("asr"):
+        return await _run()
 
 
 async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str, image_bytes: bytes | None = None):
@@ -126,7 +134,7 @@ async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str
 
     image_bytes = await _read_image(image)
     decoded, history, parts, timer, gen = await _run_turn(sid, audio_bytes, instruction, image_bytes)
-    user_text = await _transcribe(decoded.samples) if transcribe else instruction
+    user_text = await _transcribe(decoded.samples, timer) if transcribe else instruction
 
     async for _ in gen():
         pass
@@ -156,7 +164,7 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
         yield _event("session", {"session_id": sid})
         user_text = instruction
         if transcribe:
-            user_text = await _transcribe(decoded.samples) or instruction
+            user_text = await _transcribe(decoded.samples, timer) or instruction
             yield _event("transcript", {"text": user_text})
         async for chunk in gen():
             yield _event("token", {"text": chunk})
@@ -193,11 +201,23 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
         yield _event("session", {"session_id": sid})
         user_text = instruction
         if transcribe:
-            user_text = await _transcribe(decoded.samples) or instruction
+            user_text = await _transcribe(decoded.samples, timer) or instruction
             yield _event("transcript", {"text": user_text})
         buffer = ""
         idx = 0
         first_audio = False
+
+        async def _speak(index: int, sentence: str):
+            nonlocal first_audio
+            wav, t = await tts.synthesize(sentence)
+            timer.add_tts_segment(text=sentence, **t)
+            if not first_audio:
+                timer.m.time_to_first_audio_ms = (time.perf_counter() - timer._t_start) * 1000.0
+                first_audio = True
+            return _event("audio", {"index": index, "sentence": sentence, "wav_base64": _b64(wav),
+                                    "synth_ms": round(t["client_ms"], 1),
+                                    "server_ms": round(t["server_ms"], 1) if "server_ms" in t else None})
+
         async for chunk in gen():
             yield _event("token", {"text": chunk})
             buffer += chunk
@@ -205,24 +225,17 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
             for s in sentences:
                 if not s.strip():
                     continue
-                wav, synth_ms = await tts.synthesize(s)
-                if not first_audio:
-                    timer.m.time_to_first_audio_ms = (time.perf_counter() - timer._t_start) * 1000.0
-                    first_audio = True
-                yield _event("audio", {"index": idx, "sentence": s,
-                                       "wav_base64": _b64(wav), "synth_ms": round(synth_ms, 1)})
+                yield await _speak(idx, s)
                 idx += 1
         # flush any trailing partial sentence
         tail = buffer.strip()
         if tail:
-            wav, synth_ms = await tts.synthesize(tail)
-            yield _event("audio", {"index": idx, "sentence": tail,
-                                   "wav_base64": _b64(wav), "synth_ms": round(synth_ms, 1)})
+            yield await _speak(idx, tail)
 
         reply = "".join(parts)
+        # finish() aggregates the per-call TTS timings and resolves the engine
+        # name from the X-Engine header, so no extra health round-trip is needed.
         metrics = timer.finish(output_tokens=_approx_tokens(reply))
-        health = await tts.health()
-        metrics.tts_engine = health.get("engine")
         history.append(Turn(role="user", text=user_text, audio=decoded.samples, image=image_bytes))
         history.append(Turn(role="assistant", text=reply))
         _trim_history(history, app.state.settings.max_history_turns)

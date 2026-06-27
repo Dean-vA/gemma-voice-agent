@@ -352,12 +352,35 @@ function updateMetrics(m) {
   $("m-audio").textContent = m.audio_seconds != null ? `${m.audio_seconds.toFixed(1)} s` : "—";
   $("m-tokens").textContent = m.output_tokens ?? "—";
   $("m-audio1").textContent = m.time_to_first_audio_ms != null ? `${m.time_to_first_audio_ms.toFixed(0)} ms` : "—";
+  $("m-asr").textContent = ms(m.asr_ms);
+  $("m-tts").textContent = m.tts_total_ms != null ? `${m.tts_total_ms.toFixed(0)} ms` : "—";
+  renderBreakdown(m.components || []);
   updateGauge(m.ttft_ms);
 
   sess.turns += 1; sess.ttftSum += m.ttft_ms || 0; sess.tpsSum += m.tokens_per_sec || 0;
   $("m-turns").textContent = sess.turns;
   $("m-avg-ttft").textContent = `${(sess.ttftSum / sess.turns).toFixed(0)} ms`;
   $("m-avg-tps").textContent = (sess.tpsSum / sess.turns).toFixed(1);
+}
+
+// Render the per-component latency breakdown as labeled proportional bars.
+function renderBreakdown(components) {
+  const host = $("m-breakdown");
+  if (!components.length) { host.innerHTML = `<div class="bd-empty">—</div>`; return; }
+  const max = Math.max(...components.map((c) => c.ms || 0), 1);
+  host.innerHTML = components.map((c) => {
+    const pct = Math.max(2, ((c.ms || 0) / max) * 100);
+    let sub = "";
+    if (c.name === "llm" && c.ttft_ms != null) sub = `ttft ${c.ttft_ms.toFixed(0)}`;
+    else if (c.name === "tts") {
+      sub = c.calls != null ? `${c.calls}×` : "";
+      if (c.server_ms != null) sub += `${sub ? " · " : ""}net ${(c.ms - c.server_ms).toFixed(0)}`;
+    }
+    return `<div class="bd-row" title="${c.name}: ${(c.ms || 0).toFixed(1)} ms">`
+      + `<span class="bd-name">${c.name}${sub ? `<span class="bd-sub"> ${sub}</span>` : ""}</span>`
+      + `<span class="bd-bar"><span style="width:${pct}%"></span></span>`
+      + `<span class="bd-ms">${(c.ms || 0).toFixed(0)}</span></div>`;
+  }).join("");
 }
 
 function updateGauge(ttft) {
@@ -410,6 +433,7 @@ $("btn-reset").addEventListener("click", async () => {
   sess.turns = 0; sess.ttftSum = 0; sess.tpsSum = 0;
   ["m-turns"].forEach(() => {});
   $("m-turns").textContent = "0"; $("m-avg-ttft").textContent = "—"; $("m-avg-tps").textContent = "—";
+  $("m-breakdown").innerHTML = `<div class="bd-empty">—</div>`;
 });
 
 sizeCanvas();

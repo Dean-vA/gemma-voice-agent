@@ -23,15 +23,35 @@ class TTSClient:
         except Exception as exc:  # noqa: BLE001
             return {"reachable": False, "error": str(exc)}
 
-    async def synthesize(self, text: str) -> tuple[bytes, float]:
-        """Return (wav_bytes, synth_ms)."""
+    async def synthesize(self, text: str) -> tuple[bytes, dict]:
+        """Return (wav_bytes, timing).
+
+        ``timing`` always has ``client_ms`` (full round-trip incl. network).
+        When the TTS service reports them, it also carries ``server_ms`` (pure
+        synth time), ``audio_seconds`` and ``engine`` — so the gap between
+        client_ms and server_ms exposes transport/serialization overhead.
+        """
         t0 = time.perf_counter()
         r = await self._client.post(
             f"{self.base_url}/tts",
             json={"text": text, "voice": self.voice, "encoding": "wav"},
         )
         r.raise_for_status()
-        return r.content, (time.perf_counter() - t0) * 1000.0
+        timing: dict = {"client_ms": (time.perf_counter() - t0) * 1000.0}
+        h = r.headers
+        if "X-Synth-Ms" in h:
+            try:
+                timing["server_ms"] = float(h["X-Synth-Ms"])
+            except ValueError:
+                pass
+        if "X-Audio-Seconds" in h:
+            try:
+                timing["audio_seconds"] = float(h["X-Audio-Seconds"])
+            except ValueError:
+                pass
+        if "X-Engine" in h:
+            timing["engine"] = h["X-Engine"]
+        return r.content, timing
 
 
 def split_sentences(buffer: str) -> tuple[list[str], str]:

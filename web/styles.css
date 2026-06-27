@@ -242,6 +242,16 @@ main {
 .sess-row .k { color: var(--muted); font-size: 13px; }
 .sess-row .v { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
 
+/* per-component latency breakdown: name · proportional bar · ms */
+.breakdown { display: flex; flex-direction: column; gap: 7px; }
+.bd-empty { color: var(--faint); font-family: var(--mono); font-size: 13px; padding: 2px; }
+.bd-row { display: grid; grid-template-columns: 92px 1fr auto; align-items: center; gap: 8px; }
+.bd-name { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-sub { color: var(--faint); text-transform: none; letter-spacing: 0; }
+.bd-bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.bd-bar > span { display: block; height: 100%; background: var(--data-dim); border-radius: 3px; }
+.bd-ms { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--data); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+
 button.ghost {
   background: transparent; border: 1px solid var(--line); color: var(--muted);
   border-radius: var(--r-sm); padding: 5px 11px; cursor: pointer; font-size: 12px;
