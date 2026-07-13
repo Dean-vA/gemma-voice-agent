@@ -73,6 +73,18 @@
           <span id="mic-state" class="mic-state">idle</span>
         </div>
       </div>
+      <details class="persona" id="persona-panel">
+        <summary>Persona · <span id="persona-active">default</span></summary>
+        <div class="persona-body">
+          <select id="persona-select" class="tts-select" title="Persona preset"></select>
+          <textarea id="persona-text" rows="6" spellcheck="false"
+            placeholder="System prompt for this session (empty = server default)"></textarea>
+          <div class="persona-row">
+            <button id="btn-persona" class="ghost">Apply &amp; restart chat</button>
+            <span class="persona-hint">Applying a persona clears the conversation.</span>
+          </div>
+        </div>
+      </details>
       <input id="instruction" class="instruction" type="text"
              placeholder="Optional text steer sent with the audio (e.g. 'answer in one sentence')" />
     </section>
@@ -116,6 +128,7 @@
     </aside>
   </main>
 
+  <script src="/web/personas.js"></script>
   <script src="/web/app.js"></script>
 </body>
 </html>

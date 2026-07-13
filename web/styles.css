@@ -198,6 +198,29 @@ main {
 .instruction:focus { outline: none; border-color: var(--data-dim); }
 .instruction::placeholder { color: var(--faint); }
 
+/* ---------- persona panel ---------- */
+.persona {
+  margin-top: 11px; border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+  background: oklch(0.18 0.02 274);
+}
+.persona summary {
+  padding: 9px 13px; cursor: pointer; font-size: 12px; color: var(--muted); user-select: none;
+}
+.persona summary #persona-active { color: var(--data); font-family: var(--mono); font-size: 11px; }
+.persona-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 13px 13px; }
+/* Don't rely on the UA hiding <details> content — some engines still lay out
+   styled children of a closed details. */
+.persona:not([open]) .persona-body { display: none; }
+.persona-body textarea {
+  width: 100%; resize: vertical; padding: 10px 13px; border-radius: var(--r-sm);
+  background: oklch(0.16 0.02 274); border: 1px solid var(--line-soft); color: var(--text);
+  font-size: 13px; font-family: var(--sans); transition: border-color 0.2s var(--ease);
+}
+.persona-body textarea:focus { outline: none; border-color: var(--data-dim); }
+.persona-body textarea::placeholder { color: var(--faint); }
+.persona-row { display: flex; align-items: center; gap: 12px; }
+.persona-hint { font-size: 11px; color: var(--faint); }
+
 /* ---------- instrument rail ---------- */
 .rail { gap: 0; }
 

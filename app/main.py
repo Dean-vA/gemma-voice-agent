@@ -30,6 +30,10 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # session_id -> list[Turn]   (in-memory; fine for a single-process test harness)
 SESSIONS: dict[str, list[Turn]] = {}
 
+# session_id -> persona system prompt override (additive; sessions without an
+# entry use settings.system_prompt exactly as before)
+PERSONAS: dict[str, str] = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -60,6 +64,18 @@ def _trim_history(history: list[Turn], max_turns: int) -> list[Turn]:
     if len(history) > limit:
         del history[: len(history) - limit]
     return history
+
+
+def _slim_history(history: list[Turn], keep_audio_turns: int) -> None:
+    # Opt-in (-1 = keep all): drop replayed audio from user turns older than the
+    # last N, but only when the turn has transcript text to fall back on —
+    # without it, audio is the only record of what the user said.
+    if keep_audio_turns < 0:
+        return
+    with_audio = [t for t in history if t.role == "user" and t.audio is not None]
+    for turn in with_audio[: max(0, len(with_audio) - keep_audio_turns)]:
+        if turn.text:
+            turn.audio = None
 
 
 # Gemma doesn't emit a transcript of the user's speech as a side output; it goes
@@ -100,12 +116,13 @@ async def _run_turn(session_id: str, audio_bytes: bytes, instruction: str, image
     timer.mark_preprocess_done()
 
     history = SESSIONS.setdefault(session_id, [])
+    system_prompt = PERSONAS.get(session_id) or settings.system_prompt
 
     parts: list[str] = []
 
     async def _gen():
         async for chunk in backend.stream(
-            settings.system_prompt, history, decoded.samples, instruction,
+            system_prompt, history, decoded.samples, instruction,
             settings.max_new_tokens, user_image=image_bytes,
         ):
             timer.mark_first_token()
@@ -145,6 +162,7 @@ async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str
     history.append(Turn(role="user", text=user_text or instruction, audio=decoded.samples, image=image_bytes))
     history.append(Turn(role="assistant", text=reply))
     _trim_history(history, app.state.settings.max_history_turns)
+    _slim_history(history, app.state.settings.history_keep_audio_turns)
 
     return ChatResponse(session_id=sid, reply=reply, transcript=user_text or None, metrics=metrics.as_dict())
 
@@ -173,6 +191,7 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
         history.append(Turn(role="user", text=user_text, audio=decoded.samples, image=image_bytes))
         history.append(Turn(role="assistant", text=reply))
         _trim_history(history, app.state.settings.max_history_turns)
+        _slim_history(history, app.state.settings.history_keep_audio_turns)
         yield _event("done", {"reply": reply, "metrics": metrics.as_dict()})
 
     return StreamingResponse(_sse(), media_type="text/event-stream")
@@ -239,6 +258,7 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
         history.append(Turn(role="user", text=user_text, audio=decoded.samples, image=image_bytes))
         history.append(Turn(role="assistant", text=reply))
         _trim_history(history, app.state.settings.max_history_turns)
+        _slim_history(history, app.state.settings.history_keep_audio_turns)
         yield _event("done", {"reply": reply, "metrics": metrics.as_dict()})
 
     return StreamingResponse(_sse(), media_type="text/event-stream")
@@ -259,9 +279,28 @@ async def tts_engines():
     return {"engines": engines, "default": app.state.settings.tts_engine}
 
 
+@app.post("/persona")
+async def persona(session_id: str = Form(None), system_prompt: str = Form(""),
+                  reset_history: bool = Form(True)):
+    """Set (or clear) a per-session persona system prompt. Empty prompt reverts
+    to the configured default. Creates the session id if needed so a persona
+    can be chosen before the first spoken turn."""
+    sid = session_id or uuid.uuid4().hex
+    prompt = system_prompt.strip()
+    if prompt:
+        PERSONAS[sid] = prompt
+    else:
+        PERSONAS.pop(sid, None)
+    if reset_history:
+        SESSIONS.pop(sid, None)
+    return {"ok": True, "session_id": sid, "default": not prompt,
+            "history_reset": reset_history}
+
+
 @app.post("/reset")
 async def reset(session_id: str = Form(...)):
     SESSIONS.pop(session_id, None)
+    PERSONAS.pop(session_id, None)
     return {"ok": True, "session_id": session_id}
 
 
