@@ -424,17 +424,55 @@ vad.addEventListener("change", async (e) => {
 
 $("toggle-vision").addEventListener("change", (e) => { e.target.checked ? openCam() : closeCam(); });
 
+function clearTranscript() {
+  $("transcript").innerHTML = `<div class="empty" id="empty"><span class="mark">◍</span>Hold the button (or <kbd>space</kbd>) and speak. The robot brain replies in text, latency on the right.</div>`;
+  sess.turns = 0; sess.ttftSum = 0; sess.tpsSum = 0;
+  $("m-turns").textContent = "0"; $("m-avg-ttft").textContent = "—"; $("m-avg-tps").textContent = "—";
+  $("m-breakdown").innerHTML = `<div class="bd-empty">—</div>`;
+}
+
 $("btn-reset").addEventListener("click", async () => {
   if (sessionId) { const f = new FormData(); f.append("session_id", sessionId); await fetch("/reset", { method: "POST", body: f }); }
   closeCam(); $("toggle-vision").checked = false;
   sessionId = null;
   $("session-id").textContent = "no session";
-  $("transcript").innerHTML = `<div class="empty" id="empty"><span class="mark">◍</span>Hold the button (or <kbd>space</kbd>) and speak. The robot brain replies in text, latency on the right.</div>`;
-  sess.turns = 0; sess.ttftSum = 0; sess.tpsSum = 0;
-  ["m-turns"].forEach(() => {});
-  $("m-turns").textContent = "0"; $("m-avg-ttft").textContent = "—"; $("m-avg-tps").textContent = "—";
-  $("m-breakdown").innerHTML = `<div class="bd-empty">—</div>`;
+  clearTranscript();
+  // Carry the active persona into the fresh session (no-op when never set).
+  if (appliedPersona) applyPersona();
 });
+
+// ---------- persona ----------
+// Per-session system prompt override. Presets come from /web/personas.js;
+// the textarea stays editable so any prompt can be applied. Applying clears
+// the server-side history (a persona switch mid-conversation bleeds voices).
+let appliedPersona = "";                       // "" = server default
+
+function initPersona() {
+  const sel = $("persona-select");
+  for (const [key, p] of Object.entries(PERSONAS)) {
+    const o = document.createElement("option");
+    o.value = key; o.textContent = p.label;
+    sel.appendChild(o);
+  }
+  sel.onchange = () => { $("persona-text").value = PERSONAS[sel.value].prompt; };
+}
+
+async function applyPersona() {
+  const prompt = $("persona-text").value.trim();
+  const form = new FormData();
+  if (sessionId) form.append("session_id", sessionId);
+  form.append("system_prompt", prompt);
+  const data = await (await fetch("/persona", { method: "POST", body: form })).json();
+  sessionId = data.session_id;
+  $("session-id").textContent = sessionId.slice(0, 12);
+  appliedPersona = prompt;
+  const preset = Object.values(PERSONAS).find((p) => p.prompt.trim() === prompt);
+  $("persona-active").textContent = prompt ? (preset ? preset.label : "custom") : "default";
+  clearTranscript();                           // server cleared history; mirror it
+}
+
+$("btn-persona").addEventListener("click", applyPersona);
+initPersona();
 
 sizeCanvas();
 drawWave();

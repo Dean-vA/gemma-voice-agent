@@ -40,6 +40,12 @@ class Settings(BaseSettings):
 
     # Conversation
     max_history_turns: int = 8
+    # Replayed user audio dominates context in long chats. If >= 0, keep raw
+    # audio only for the most recent N user turns *that have a transcript*;
+    # older ones fall back to their transcribed text. Turns without text
+    # (transcribe=false) always keep audio. -1 (default) = keep all audio,
+    # preserving existing behavior.
+    history_keep_audio_turns: int = -1
     max_new_tokens: int = 256
     system_prompt: str = (
         "You are a friendly humanoid robot assistant. Reply in short, natural "

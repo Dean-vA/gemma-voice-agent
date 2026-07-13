@@ -15,9 +15,11 @@
 # Set in Portainer's "Environment variables" panel:
 #   HF_TOKEN          (required — Gemma repos are gated)
 #   QAT_MODEL_ID      (optional)
-#   SYSTEM_PROMPT     (optional)
+#   SYSTEM_PROMPT     (optional — default persona; overridable per session via POST /persona)
 #   MAX_NEW_TOKENS    (optional)
 #   MAX_HISTORY_TURNS (optional)
+#   HISTORY_KEEP_AUDIO_TURNS (optional — -1 keeps all replayed audio [default];
+#                             >=0 drops audio from older transcribed user turns)
 
 x-gpu: &gpu
   deploy:
@@ -96,6 +98,7 @@ services:
       - TTS_ENGINE=kokoro
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
       - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-8}
+      - HISTORY_KEEP_AUDIO_TURNS=${HISTORY_KEEP_AUDIO_TURNS:--1}
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a friendly humanoid robot assistant. Reply in short, natural spoken sentences. Be concise and conversational.}
     volumes:
       - hf-cache:/root/.cache/huggingface
