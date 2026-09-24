@@ -37,16 +37,24 @@ class VLLMBackend(ChatBackend):
         # API key is unused by a local vLLM server but the client requires one.
         self.client = AsyncOpenAI(base_url=settings.vllm_base_url, api_key="EMPTY")
         self.model = settings.qat_model_id
+        self._discovered = False
 
     async def load(self) -> None:
-        # Discover the served model id (vLLM serves under the path it was given).
+        # Discover the served model id (vLLM serves under --served-model-name).
         try:
             models = await self.client.models.list()
             if models.data:
                 self.model = models.data[0].id
+                self._discovered = True
         except Exception:
             # Leave the configured id; /health will surface connectivity issues.
             pass
+
+    async def _ensure_model(self) -> None:
+        # If the gateway came up before vLLM, startup discovery failed and every
+        # request 404s on the fallback id -- retry discovery until it succeeds.
+        if not self._discovered:
+            await self.load()
 
     def _build_messages(
         self, system_prompt: str, history: list[Turn], user_audio: np.ndarray,
@@ -54,16 +62,14 @@ class VLLMBackend(ChatBackend):
     ) -> list[dict]:
         sr = self.settings.sample_rate
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        # Past user turns go in as TEXT only. Re-sending every earlier clip puts
+        # several audio items in one request, which crashes vLLM 0.26's Gemma-4
+        # audio encoder ('list' object has no attribute 'squeeze') and kills the
+        # engine. Only the current turn carries audio/image.
         for turn in history:
             if turn.role == "user":
-                content: list[dict] = []
-                if turn.text:
-                    content.append({"type": "text", "text": turn.text})
-                if turn.image is not None:
-                    content.append(_image_part(turn.image))  # image AFTER text
-                if turn.audio is not None:
-                    content.append(_audio_part(turn.audio, sr))  # audio last
-                messages.append({"role": "user", "content": content})
+                text = turn.text or "(the user spoke; audio not retained)"
+                messages.append({"role": "user", "content": text})
             else:
                 messages.append({"role": "assistant", "content": turn.text})
 
@@ -85,6 +91,7 @@ class VLLMBackend(ChatBackend):
         max_new_tokens: int,
         user_image: bytes | None = None,
     ) -> AsyncIterator[str]:
+        await self._ensure_model()
         messages = self._build_messages(system_prompt, history, user_audio, instruction, user_image)
         resp = await self.client.chat.completions.create(
             model=self.model,
