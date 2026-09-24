@@ -36,6 +36,7 @@ services:
       dockerfile: vllm.Dockerfile
     image: gemma-vllm-audio:latest
     profiles: ["vllm"]
+    restart: unless-stopped
     <<: *gpu
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
