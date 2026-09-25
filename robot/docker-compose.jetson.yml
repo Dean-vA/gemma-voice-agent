@@ -1,0 +1,104 @@
+# Robot-side deployment of the Gemma voice agent on a Unitree G1 (Jetson Orin).
+#
+# ADDITIVE: this does NOT touch the root docker-compose.yml (the 5090 stack).
+# The heavy Gemma 4 E4B model runs OFF-BOARD on a server; the robot only runs
+# the thin client + a warm Piper TTS server. No GPU/torch/vLLM on the robot.
+#
+# Reuses the on-robot 'g1-greeter-shadow:latest' image, which already carries
+# unitree_sdk2py, cyclonedds, piper-tts, httpx and espeak-ng. (If you don't have
+# that image, build one with those deps — see robot/README.md.)
+#
+# Usage on the robot (Orin), with the robot in a normal/ready state:
+#   docker stop piper-tts g1-greeter-shadow 2>/dev/null || true   # free port 5000
+#   GEMMA_URL=http://<gateway-host>:2730 PRESENCE_WEB_PASSWORD=<pick-one> \
+#     docker compose -f docker-compose.jetson.yml up
+#
+# F2 toggles the agent on/off; hold F1 to talk.
+
+services:
+  piper-tts:
+    image: g1-greeter-shadow:latest
+    container_name: gemma-piper-tts
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - CYCLONEDDS_HOME=/opt/cyclonedds/install
+    entrypoint:
+      - python3
+      - -m
+      - piper.http_server
+      - -m
+      - /opt/piper-voices/en_US-ryan-high.onnx
+      - --length-scale
+      - "1.08"
+      - --host
+      - 127.0.0.1
+      - --port
+      - "5000"
+
+  gemma-client:
+    image: g1-greeter-shadow:latest
+    container_name: gemma-g1-client
+    network_mode: host          # needs eth0 (DDS) + wlan0 (reach the server)
+    restart: unless-stopped     # auto-start on robot boot (docker.service is enabled)
+    depends_on: [piper-tts]
+    devices:
+      - "/dev/snd:/dev/snd"
+      # Map the CyberTrack by its STABLE by-id name to a fixed in-container node.
+      # USB cams renumber on re-enumeration (e.g. video6 -> video7 when the
+      # RealSense grabs lower numbers); the by-id symlink always tracks the right
+      # camera, and the container always sees it as /dev/video6 (CAM_DEV=6).
+      - "/dev/v4l/by-id/usb-CyberTrack_H3_CyberTrack_H3-video-index0:/dev/video6"
+    environment:
+      - G1_IFACE=${G1_IFACE:-eth0}
+      - SEND_IMAGE=1
+      - CAM_DEV=6
+      - GEMMA_URL=${GEMMA_URL:?set GEMMA_URL to your gateway, e.g. http://<gateway-host>:2730}
+      - PIPER_HTTP_URL=http://127.0.0.1:5000
+      - SEND_TRANSCRIPT=${SEND_TRANSCRIPT:-0}
+      - CYCLONEDDS_HOME=/opt/cyclonedds/install
+      # --- presence-mode tuning (override at `up` time, e.g. PRESENCE_DEBUG=1) ---
+      - PRESENCE_DEBUG=${PRESENCE_DEBUG:-0}
+      - PRESENCE_PROX_FRAC=${PRESENCE_PROX_FRAC:-0.18}
+      - PRESENCE_ARM_SECS=${PRESENCE_ARM_SECS:-1.0}
+      - PRESENCE_DISARM_SECS=${PRESENCE_DISARM_SECS:-2.0}
+      - PRESENCE_SILENCE_MS=${PRESENCE_SILENCE_MS:-900}
+      - PRESENCE_SIL_MARGIN=${PRESENCE_SIL_MARGIN:-1.8}
+      - PRESENCE_CONTINUE_MULT=${PRESENCE_CONTINUE_MULT:-1.3}
+      - PRESENCE_HAAR_NEIGHBORS=${PRESENCE_HAAR_NEIGHBORS:-4}
+      - PRESENCE_HAAR_MIN_PX=${PRESENCE_HAAR_MIN_PX:-60}
+      - PRESENCE_DRAIN_PAD=${PRESENCE_DRAIN_PAD:-0.25}
+      # VAD auto-calibration (energy gate; webrtcvad off by default on this mic)
+      - PRESENCE_NOISE_MULT=${PRESENCE_NOISE_MULT:-1.7}
+      - PRESENCE_CALIB_PCTL=${PRESENCE_CALIB_PCTL:-50}
+      - PRESENCE_MIN_FLOOR=${PRESENCE_MIN_FLOOR:-0.010}
+      - PRESENCE_USE_WEBRTCVAD=${PRESENCE_USE_WEBRTCVAD:-0}
+      # mic source: "array" = G1 built-in 4-mic array (UDP multicast, ~4x lower
+      # noise floor; falls back to USB if it stalls), "usb" = USB dongle
+      - PRESENCE_MIC=${PRESENCE_MIC:-array}
+      - PRESENCE_ARRAY_MIN_FLOOR=${PRESENCE_ARRAY_MIN_FLOOR:-0.004}
+      - PRESENCE_ARRAY_ONSET_BOOST=${PRESENCE_ARRAY_ONSET_BOOST:-1.5}
+      # periodic ambient recalibration (rolling average) while the room is empty
+      - PRESENCE_RECALIB_SECS=${PRESENCE_RECALIB_SECS:-30}
+      - PRESENCE_RECALIB_AVG_N=${PRESENCE_RECALIB_AVG_N:-5}
+      # camera watchdog: reopen a wedged USB cam so the feed self-heals
+      - PRESENCE_CAM_STALE_SECS=${PRESENCE_CAM_STALE_SECS:-3.0}
+      - PRESENCE_CAM_FAIL_LIMIT=${PRESENCE_CAM_FAIL_LIMIT:-20}
+      # transcript for the HEARD box: on by default (extra ASR Gemma call ~+latency;
+      # set PRESENCE_TRANSCRIBE=0 at `up` time for minimum latency / no HEARD)
+      - PRESENCE_TRANSCRIBE=${PRESENCE_TRANSCRIBE:-1}
+      # web control centre (in-process Flask; network_mode host -> reachable on :PORT)
+      - PRESENCE_WEB=${PRESENCE_WEB:-1}
+      - PRESENCE_WEB_PORT=${PRESENCE_WEB_PORT:-8080}
+      - PRESENCE_WEB_PASSWORD=${PRESENCE_WEB_PASSWORD:?set PRESENCE_WEB_PASSWORD for the control centre}
+    volumes:
+      - ./g1_gemma_client.py:/app/g1_gemma_client.py:ro
+      - ./usb_mic.py:/app/usb_mic.py:ro
+      - ./converse_mode.py:/app/converse_mode.py:ro
+      - ./usb_cam.py:/app/usb_cam.py:ro
+      - ./presence.py:/app/presence.py:ro
+      - ./control_center.py:/app/control_center.py:ro
+      - ./prompts.json:/app/prompts.json:rw
+    entrypoint: ["sh","-c","pip install sounddevice opencv-python-headless webrtcvad-wheels >/dev/null 2>&1; apt-get install -y libportaudio2 >/dev/null 2>&1 || true; exec python3 /app/g1_gemma_client.py ${G1_IFACE:-eth0}"]
+    stdin_open: true
+    tty: true
