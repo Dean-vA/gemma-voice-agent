@@ -1,0 +1,9 @@
+# Laptop dev/simulation deps for the G1 control centre (managed by uv).
+# NOT used on the robot — the robot gets its deps from the Docker image/entrypoint.
+flask
+numpy
+opencv-python
+sounddevice
+httpx
+# webrtcvad is optional; energy-VAD is the default (PRESENCE_USE_WEBRTCVAD=0).
+# webrtcvad-wheels
