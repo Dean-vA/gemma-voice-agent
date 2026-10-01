@@ -571,6 +571,39 @@ def _build_app(hub, store, controller, busy):
                 v.continue_thresh = max(mf * 0.8, nf * presence.CONTINUE_MULT)
         return jsonify(_tune_snapshot())
 
+    # Gateway pipeline options: who transcribes, and whether Gemma answers from
+    # the audio or from the transcript. presence.py globals, read per turn.
+    def _gateway_snapshot():
+        import presence
+        out = {"transcribe": bool(presence.CONV_TRANSCRIBE),
+               "asr_engine": presence.ASR_ENGINE, "llm_input": presence.LLM_INPUT,
+               "engines": None, "gateway_default": None}
+        try:  # which engines has the gateway loaded? (absent on older gateways)
+            import urllib.request
+            with urllib.request.urlopen(presence.GEMMA_URL + "/asr/engines", timeout=2.0) as r:
+                info = json.loads(r.read().decode("utf-8"))
+            out["engines"] = [e["name"] for e in info.get("engines", []) if e.get("available")]
+            out["gateway_default"] = {"asr_engine": info.get("default"), "llm_input": info.get("llm_input")}
+        except Exception:
+            pass
+        return out
+
+    @app.route("/api/gateway", methods=["GET", "POST"])
+    def api_gateway():
+        import presence
+        if request.method == "POST":
+            body = request.get_json(force=True) or {}
+            if "transcribe" in body:
+                presence.CONV_TRANSCRIBE = bool(body["transcribe"])
+            if body.get("asr_engine") in ("", "gemma", "parakeet"):
+                presence.ASR_ENGINE = body["asr_engine"]
+            if body.get("llm_input") in ("", "audio", "transcript"):
+                presence.LLM_INPUT = body["llm_input"]
+            print(f"[web] gateway options: transcribe={presence.CONV_TRANSCRIBE} "
+                  f"asr_engine={presence.ASR_ENGINE or '(gateway default)'} "
+                  f"llm_input={presence.LLM_INPUT or '(gateway default)'}")
+        return jsonify(_gateway_snapshot())
+
     @app.route("/api/mic", methods=["POST"])
     def api_mic():
         v = getattr(controller, "vad", None)
@@ -832,6 +865,26 @@ label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--m
     </div>
 
     <div class=card>
+      <h2>Gateway pipeline</h2>
+      <div class=prow>
+        <label for=gw_heard title="Who writes the HEARD transcript. Off is fastest when Gemma hears the audio itself.">transcript (HEARD)</label>
+        <select id=gw_heard>
+          <option value=off>off</option>
+          <option value=gemma>Gemma (2nd LLM call)</option>
+          <option value=parakeet>Parakeet</option>
+        </select>
+      </div>
+      <div class=prow style=margin-top:10px>
+        <label for=gw_input title="What Gemma answers from: the speech itself, or a Parakeet transcript of it (cascade).">Gemma answers from</label>
+        <select id=gw_input>
+          <option value=audio>the audio (audio-native)</option>
+          <option value=transcript>the transcript (cascade)</option>
+        </select>
+      </div>
+      <div class=prow style=margin-top:10px><span class=tag id=gwst></span></div>
+    </div>
+
+    <div class=card>
       <h2>Logs</h2>
       <div id=log></div>
     </div>
@@ -898,7 +951,7 @@ const N={
   tts:{l:'kokoro',x:452,y:210,w:150,h:72,bar:1,sub:'speech',
     desc:"kokoro TTS — text-to-speech. Converts Gemma's reply text into speech audio, sentence by sentence, so the first words can start playing before the whole reply is written."},
   asr:{l:'ASR',x:452,y:300,w:150,h:82,bar:1,sub:'transcript',
-    desc:"ASR — a SECOND, optional Gemma call that transcribes the speech to text, purely to show you what was heard. The reply doesn't depend on it (Gemma hears the audio directly), so it only runs when transcription is requested."},
+    desc:"ASR — transcribes the speech to text: either a second Gemma call or Parakeet (see Gateway pipeline). Normally it only feeds HEARD and the reply doesn't depend on it, because Gemma hears the audio directly. In cascade mode Gemma answers from this transcript instead of the audio."},
   spk:{l:'G1 Speaker',x:690,y:206,w:120,h:80,sub:'playback',
     desc:"G1 Speaker — the robot's head speaker plays the reply audio (over DDS on the robot; your laptop speakers in dev mode). 'Playback' is how many seconds of speech were produced."},
   reply:{l:'REPLY',x:690,y:104,w:352,h:82,fo:1,cls:'r',tid:'reply',
@@ -960,7 +1013,7 @@ const LINKS=[
     g.appendChild(E('rect',{class:'nbox',width:n.w,height:n.h,rx:13}));
     g.appendChild(T(n.l,{class:'nname',x:n.w/2,y:n.bar?20:22}));
     g.appendChild(T('—',{class:'nlat',id:'lat_'+k,x:n.w/2,y:n.bar?42:44}));
-    if(n.sub)g.appendChild(T(n.sub,{class:'nsub',x:n.w/2,y:n.bar?(n.h-22):(n.h-10)}));
+    if(n.sub)g.appendChild(T(n.sub,{class:'nsub',id:'sub_'+k,x:n.w/2,y:n.bar?(n.h-22):(n.h-10)}));
     if(n.bar){g.appendChild(E('rect',{class:'barbg',x:12,y:n.h-13,width:n.w-24,height:5,rx:3}));
               g.appendChild(E('rect',{class:'barfg',id:'bar_'+k,x:12,y:n.h-13,width:0,height:5,rx:3}));}
     if(k==='spk'){for(let i=0;i<4;i++)g.appendChild(E('rect',{class:'eqbar',x:n.w/2-18+i*10,y:n.h-26,width:6,height:12,rx:2}));}
@@ -1001,6 +1054,10 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
 
   const t=s.turn||{},m=t.metrics||{},h=t.hops||{},comp={};
   (m.components||[]).forEach(c=>comp[c.name]=c.ms);
+  // which ASR engine ran, and whether Gemma answered from the audio or the transcript
+  const asrc=(m.components||[]).find(c=>c.name==='asr'), sa=$('sub_asr'), sl=$('sub_llm');
+  if(sa)sa.textContent=asrc&&asrc.engine?asrc.engine:'transcript';
+  if(sl)sl.textContent=m.llm_input==='transcript'?'reads transcript + sees':'reason + see';
   const secs=v=>(v==null)?'—':(+v).toFixed(1)+'s';
   node('cam','live'); node('detector','n='+(p.nfaces||0));
   node('mic',secs(m.audio_seconds));
@@ -1054,6 +1111,30 @@ $('micsrc').onchange=()=>{const src=$('micsrc').value;$('micst').textContent='sw
     .then(r=>r.json()).then(d=>{$('micst').textContent=d.ok?('using '+d.mic_source+' · recalibrates when idle'):(d.error||'failed');loadTune();});};
 TKEYS.forEach(k=>{const el=$('t_'+k); if(el)el.oninput=()=>{$('v_'+k).textContent=el.value;
   clearTimeout(tuneT);tuneT=setTimeout(()=>fetch('/api/tune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:parseFloat(el.value)})}),200);};});
+// gateway pipeline: transcript engine + what Gemma answers from (applies to the next turn)
+function showGw(d){
+  $('gw_heard').value=d.transcribe?(d.asr_engine||(d.gateway_default&&d.gateway_default.asr_engine)||'gemma'):'off';
+  $('gw_input').value=d.llm_input||(d.gateway_default&&d.gateway_default.llm_input)||'audio';
+  const eng=d.engines, hasP=!!eng&&eng.includes('parakeet');
+  $('gw_heard').querySelector('option[value=parakeet]').disabled=!hasP;
+  $('gw_input').querySelector('option[value=transcript]').disabled=!hasP;
+  $('gwst').textContent=!eng?'gateway unreachable, or too old for these options'
+    :(hasP?'gateway engines: '+eng.join(', '):'Parakeet is not loaded on the gateway')
+     +(d.llm_input==='transcript'?' · cascade: HEARD is always shown':'');
+}
+function loadGw(){fetch('/api/gateway').then(r=>r.json()).then(showGw);}
+function saveGw(){
+  const h=$('gw_heard').value, inp=$('gw_input').value;
+  // The cascade runs on Parakeet; "off" there only means no extra engine choice.
+  const body={transcribe:h!=='off', asr_engine:h==='off'?(inp==='transcript'?'parakeet':''):h, llm_input:inp};
+  $('gwst').textContent='saving…';
+  fetch('/api/gateway',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(showGw);
+}
+$('gw_heard').onchange=saveGw;
+$('gw_input').onchange=()=>{ if($('gw_input').value==='transcript'&&$('gw_heard').value==='gemma')$('gw_heard').value='parakeet'; saveGw(); };
+loadGw();
+
 $('calib').onclick=()=>{$('calibst').textContent='calibrating…';
   fetch('/api/calibrate',{method:'POST'}).then(r=>r.json()).then(d=>{
     $('calibst').textContent=d.ok?('floor '+(+d.noise_floor).toFixed(4)+' → thr '+(+d.speech_thresh).toFixed(4)):(d.error||'failed');});};

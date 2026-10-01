@@ -57,7 +57,8 @@ Mic/VAD ─audio──▶ │  decode ─┬─▶ Gemma 4B (reason+see, audio-n
 
 Key facts (confirmed in `gemma-voice-agent/app/main.py` + `metrics.py`):
 - **Gemma is audio-native** — it reasons over the decoded audio + image directly; the reply is the `llm` stage.
-- **ASR is a *second Gemma call*** (`_transcribe()` with a transcription system prompt), **not** a separate service. It runs only when `transcribe=true`, purely to show the HEARD text; the reply doesn't depend on it. Hence the diagram shows it as a parallel branch off `decode`.
+- **ASR is by default a *second Gemma call*** (`_transcribe()` with a transcription system prompt). It runs only when `transcribe=true`, purely to show the HEARD text; the reply doesn't depend on it. Hence the diagram shows it as a parallel branch off `decode`.
+- **Parakeet + cascade (newer gateways):** the gateway can also transcribe with Parakeet TDT (`asr_engine=parakeet`, ~25 ms instead of a few hundred), and with `llm_input=transcript` Gemma answers from that transcript instead of the audio. Both are switchable from the control centre's *Gateway pipeline* card.
 - **No control/gesture output from the gateway** — `/converse` returns reply text only → TTS. The G1 wave is an on-robot reflex (`presence._farewell`), not a model output. (See §9.)
 - Gateway `done` event carries `metrics.components` = `[audio_decode, asr, llm, tts]` plus `ttft_ms`, `generation_ms`, `tokens_per_sec`, `time_to_first_audio_ms`, `tts_audio_seconds`, `prefix_cache_hit`, `total_ms`.
 
@@ -70,6 +71,7 @@ Key facts (confirmed in `gemma-voice-agent/app/main.py` + `metrics.py`):
 - **Live streaming** — HEARD appears on transcript, REPLY streams token-by-token, and the per-stage boxes fill in the moment generation finishes (during playback, not after).
 - **Logs** — stdout tee → SSE console (docker logs still works).
 - **Prompt presets** — named presets (greet/converse/goodbye); `+ New`, Save, Activate (live, no restart), Delete. The "converse" field is George's system prompt/persona.
+- **Gateway pipeline** — two live dropdowns, applied from the next turn: who writes the HEARD transcript (off / Gemma / Parakeet), and what Gemma answers from (the audio, or a Parakeet transcript = cascade). Options the gateway hasn't loaded are greyed out; the ASR box in the diagram shows which engine ran.
 - **Tuning** — live sliders: proximity gate, arm/disarm seconds, end-of-speech ms, VAD onset ×; **mic source** dropdown (G1 mic array / USB mic — switches on the next listen and recalibrates); **Run VAD calibration** button (array: runs live, even mid-conversation; USB: queued until idle, because the USB mic can't be opened twice).
 
 ---
@@ -109,7 +111,7 @@ On the robot the real mic/VAD, kokoro→head speaker, V4L2 camera, and arm wave 
 ---
 
 ## 6. Endpoints
-`GET /` UI · `GET /video.mjpg` · `GET /last_image.jpg` · `GET /logs` (SSE) · `GET /state` (SSE) · `GET|POST /api/prompts` · `DELETE /api/prompts/<name>` · `POST /api/prompts/active` · `POST /api/control {arm|disarm|toggle}` · `POST /api/utterance` (raw WAV) · `GET|POST /api/tune` (GET also returns `mic_source`) · `POST /api/calibrate` · `POST /api/mic {"source": "array"|"usb"}`. All behind HTTP Basic (empty password = open).
+`GET /` UI · `GET /video.mjpg` · `GET /last_image.jpg` · `GET /logs` (SSE) · `GET /state` (SSE) · `GET|POST /api/prompts` · `DELETE /api/prompts/<name>` · `POST /api/prompts/active` · `POST /api/control {arm|disarm|toggle}` · `POST /api/utterance` (raw WAV) · `GET|POST /api/gateway {transcribe, asr_engine, llm_input}` · `GET|POST /api/tune` (GET also returns `mic_source`) · `POST /api/calibrate` · `POST /api/mic {"source": "array"|"usb"}`. All behind HTTP Basic (empty password = open).
 
 ---
 
@@ -117,6 +119,7 @@ On the robot the real mic/VAD, kokoro→head speaker, V4L2 camera, and arm wave 
 - **Web:** `PRESENCE_WEB`(1), `PRESENCE_WEB_PORT`(8080), `PRESENCE_WEB_PASSWORD`(""=open), `PRESENCE_WEB_FPS`(14), `PRESENCE_WEB_MAX_CLIENTS`(8), `PRESENCE_PROMPTS_PATH`.
 - **Presence:** `PRESENCE_PROX_FRAC`(0.18), `PRESENCE_ARM_SECS`(1.0), `PRESENCE_DISARM_SECS`(2.0), `PRESENCE_STAY_FRAC`(0.12 — looser face gate once a conversation is running), `PRESENCE_CONV_DISARM_SECS`(5.0 — absence before a mid-conversation goodbye), `PRESENCE_HAAR_NEIGHBORS`(4), `PRESENCE_HAAR_MIN_PX`(60).
 - **Mic source:** `PRESENCE_MIC`(compose `array`, code `usb`), `PRESENCE_ARRAY_MIN_FLOOR`(0.004), `PRESENCE_ARRAY_ONSET_BOOST`(1.5 — array onset = floor × NOISE_MULT × this), `PRESENCE_ARRAY_LOCAL_IP`(192.168.123.164), `PRESENCE_MIC_READ_TIMEOUT`(1.0 s — a read that waits longer = mic stall).
+- **Gateway pipeline:** `PRESENCE_TRANSCRIBE`(compose 1), `PRESENCE_ASR_ENGINE`("" = gateway default; `gemma` | `parakeet`), `PRESENCE_LLM_INPUT`("" = gateway default; `audio` | `transcript`). Needs a gateway with Parakeet loaded; older gateways ignore the extra fields.
 - **VAD:** `PRESENCE_SILENCE_MS`(compose 900), `PRESENCE_NOISE_MULT`(1.7), `PRESENCE_CONTINUE_MULT`(1.3), `PRESENCE_SIL_MARGIN`(1.8), `PRESENCE_CALIB_PCTL`(50), `PRESENCE_MIN_FLOOR`(0.010, USB), `PRESENCE_USE_WEBRTCVAD`(0 — energy VAD default), `PRESENCE_RECALIB_SECS`(30), `PRESENCE_RECALIB_AVG_N`(5), `PRESENCE_FLOOR_TRIM`(0.9).
 - **Wave/diag:** `PRESENCE_WAVE`(1), `PRESENCE_WAVE_ACTION`(25), `PRESENCE_WAVE_HOLD`(2.5), `PRESENCE_TRANSCRIBE`(compose 1), `PRESENCE_DEBUG`(0).
 - **Camera/mic:** `CAM_BACKEND`(v4l2 on Linux), `CAM_DEV`(6)/`CAM_INDEX`(0), `CAM_W/H`, `MIC_INDEX`, `PRESENCE_DEV_GAIN`(1.0, laptop).

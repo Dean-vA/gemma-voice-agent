@@ -153,6 +153,13 @@ SPEAK_DRAIN_PAD = float(os.environ.get("PRESENCE_DRAIN_PAD", "0.25"))  # post-pl
 # audio-native and doesn't need it). Off by default for latency; PRESENCE_TRANSCRIBE=1
 # turns it back on so the `heard:` line shows what the VAD captured.
 CONV_TRANSCRIBE = os.environ.get("PRESENCE_TRANSCRIBE", "").strip().lower() in ("1", "true", "yes", "on")
+# Gateway pipeline options (live-switchable from the control centre). Empty =
+# leave it to the gateway's own default, which also keeps older gateways happy.
+#   ASR_ENGINE  who writes the transcript: "gemma" (a 2nd LLM call) | "parakeet"
+#   LLM_INPUT   what Gemma answers from: "audio" (hears the speech itself) |
+#               "transcript" (cascade: Parakeet transcript as text, no audio)
+ASR_ENGINE = os.environ.get("PRESENCE_ASR_ENGINE", "").strip().lower()
+LLM_INPUT  = os.environ.get("PRESENCE_LLM_INPUT", "").strip().lower()
 
 # --- Instructions (env-overridable) -----------------------------------------
 GREET_INSTRUCTION = os.environ.get(
@@ -850,6 +857,14 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
     data  = {"engine": TTS_ENGINE}
     if transcribe:
         data["transcribe"] = "true"
+        if ASR_ENGINE:
+            data["asr_engine"] = ASR_ENGINE
+    # Cascade only for real speech: the greeting/goodbye send a silent clip,
+    # which has nothing to transcribe.
+    if LLM_INPUT and phase == "converse":
+        data["llm_input"] = LLM_INPUT
+        if ASR_ENGINE:
+            data["asr_engine"] = ASR_ENGINE
     if instruction:
         data["instruction"] = instruction
     sid = session_id or SESSION_ID
