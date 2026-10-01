@@ -260,6 +260,7 @@ class StreamSession:
         self._ws = None
         self._image = None
         self._turn_t0 = None
+        self.last_activity = time.time()   # last speech heard / reply playing (presence keep-alive)
         self._reply = []
         self._heard = ""
         self._marks = set()
@@ -409,6 +410,8 @@ class StreamSession:
 
     def _on_event(self, ev: dict) -> None:
         kind = ev.get("type")
+        if kind in ("speech_started", "speech_stopped", "token", "audio"):
+            self.last_activity = time.time()
         if kind == "speech_started":
             if self.player.active:
                 print("[stream] barge-in: visitor spoke over the reply")

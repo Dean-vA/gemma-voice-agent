@@ -1322,7 +1322,12 @@ class PresenceController(threading.Thread):
         def watch():
             while watching.is_set():
                 try:
-                    if self._present_now(STAY_FRAC):
+                    # A turn in progress counts as presence: someone talking to
+                    # George, or George replying, is not a visitor who walked off
+                    # (the face can drop below the gate while they talk).
+                    talking = (session.player.active
+                               or time.time() - session.last_activity < CONV_DISARM_SECS)
+                    if talking or self._present_now(STAY_FRAC):
                         self.last_seen = time.time()
                     elif (time.time() - self.last_seen) >= CONV_DISARM_SECS:
                         left.set()
