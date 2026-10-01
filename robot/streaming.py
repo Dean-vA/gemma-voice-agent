@@ -242,6 +242,12 @@ class Player:
                     self._set_active(False)
 
 
+# George's echo profile (post-AEC frame RMS while he speaks), shared by every
+# streamed session in this process: a new visitor's first reply would otherwise
+# start with no echo level learned and a barge-in threshold far too low
+# (seen on the robot: 0.024 against George's echo peaks).
+_ECHO_LVL: list = []
+
 # ============================== the session ===================================
 class StreamSession:
     """One streamed conversation: from the greeting until the visitor leaves.
@@ -264,7 +270,7 @@ class StreamSession:
         # the gate's open/hangover state while he speaks
         self._ambient = []                 # frame RMS, last ~10 s with George silent
         self._near_thresh = 0.0            # near-field level: background x mult (>= min)
-        self._play_lvl = []                # post-AEC frame RMS while George speaks (echo residual), last ~10 s
+        self._play_lvl = _ECHO_LVL         # post-AEC frame RMS while George speaks (echo residual), last ~10 s; kept across visitors
         self._play_thresh = 0.0            # gate threshold while George speaks
         self.last_near_voice = 0.0         # last frame loud enough to be the visitor up close
         self._lvl = []                     # frame RMS since the last level log
@@ -426,7 +432,9 @@ class StreamSession:
                                 background * float(o.get("barge_gate_mult", 3.0)))
         # While George speaks the gate must also clear his own leftover echo: 1.5x
         # its recent 90th percentile (the visitor up close measured 0.3-0.4, far above).
-        echo_p90 = float(np.percentile(self._play_lvl, 90)) if len(self._play_lvl) >= 30 else 0.0
+        # until ~1 s of his echo has been heard, assume the measured level at x1.5 speech gain
+        echo_p90 = (float(np.percentile(self._play_lvl, 90)) if len(self._play_lvl) >= 30
+                    else float(o.get("barge_echo_default", 0.04)))
         self._play_thresh = max(self._near_thresh, echo_p90 * float(o.get("barge_echo_mult", 1.5)))
         if rms > self._near_thresh and self._play_t0 is None and len(self._ambient) >= 30:
             self.last_near_voice = now           # (while George speaks his echo could count)
