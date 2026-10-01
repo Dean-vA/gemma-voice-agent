@@ -443,6 +443,9 @@ class VadCapture:
         self.source = "array" if MIC_SOURCE == "array" else "usb"
         self.min_floor = ARRAY_MIN_FLOOR if self.source == "array" else MIN_FLOOR
         self.need_recalib = False                # set on source fallback
+        self.calib_retry = False                 # array still warming up: calibrate again (no re-enable)
+        self.warm_retries = 0
+        self.silent_enables = 0                  # mic-mode switch-ons that never produced audio
         self._array_stalls = 0
         self._sock = None
         self._stop_rx = None
@@ -547,6 +550,13 @@ class VadCapture:
                     del buf[:nbytes]
         threading.Thread(target=_rx, daemon=True).start()
 
+    def array_live(self, secs=0.5):
+        """Is the array already streaming real audio? Then mic mode is on and
+        must not be switched on again (each call restarts the array and makes
+        the robot announce "wake-up mode")."""
+        r = self._array_sample_rms(secs)
+        return bool(r) and sum(1 for x in r if x > 0.0) > len(r) // 2
+
     def _array_sample_rms(self, secs):
         """Per-30ms-frame RMS of `secs` of array audio, on a private socket."""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -649,9 +659,12 @@ class VadCapture:
             # pinned the thresholds to the minimum. A live mic is never exactly 0.
             live = [r for r in rmss if r > 0.0]
             if len(live) < len(rmss) // 2:
-                print("[presence] calib: array still warming up (silent frames) -> retrying")
-                self.need_recalib = True
-                return None
+                self.warm_retries += 1
+                print(f"[presence] calib: array still warming up (silent frames) -> retry {self.warm_retries}")
+                self.calib_retry = True          # NOT need_recalib: re-enabling mic mode restarts
+                return None                      # the array (silent again) and the robot says "wake-up mode"
+            self.warm_retries = 0
+            self.silent_enables = 0
             rmss = live
             if reset:
                 self.floor_hist = []
@@ -1116,11 +1129,33 @@ class PresenceController(threading.Thread):
                 if self.vad.need_recalib:              # mic source fell back
                     self.vad.need_recalib = False
                     self._recalib = True
-                if self._recalib:
+                if self._recalib or self.vad.calib_retry:
+                    retry = self.vad.calib_retry and not self._recalib
                     self._recalib = False
+                    self.vad.calib_retry = False
                     self._last_recalib = time.time()
                     if self.vad.source == "array":
-                        enable_array_mic(self.audio)   # (re)arm the array stream
+                        # Switch mic mode on only when the array isn't streaming:
+                        # on arm / after a reboot, or if it stays silent through
+                        # ~5 warm-up retries. Never on every recalibration.
+                        if retry and self.vad.warm_retries < 5:
+                            pass
+                        elif not self.vad.array_live():
+                            self.vad.warm_retries = 0
+                            if self.vad.silent_enables >= 2:
+                                # The voice service streams only zeros and switching
+                                # mic mode on again won't fix it (seen on the robot;
+                                # a vui_service restart did). Stop retrying: every
+                                # switch-on makes the robot announce "wake-up mode".
+                                print("[presence] mic array stays silent after 2 tries -> using the USB mic. "
+                                      "Fix: restart the robot's vui_service, then switch the mic source back to the array.")
+                                self.vad.silent_enables = 0
+                                ok, _ = self.vad.set_source("usb")
+                                if not ok:                  # no USB mic either: greet-only
+                                    self.vad.mark_degraded()
+                            else:
+                                self.vad.silent_enables += 1
+                                enable_array_mic(self.audio)
                     self._run_calib(reset=True, secs=CALIB_SECS)
                 elif (RECALIB_SECS > 0 and not self._present
                       and (time.time() - self._last_recalib) >= RECALIB_SECS):
