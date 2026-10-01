@@ -891,6 +891,14 @@ class VadCapture:
 
 
 # ========================= /converse turn (with instruction) =================
+# What the gateway's history records as the visitor's line for turns made from
+# silence (otherwise "(the user spoke; audio not retained)").
+_PHASE_NOTES = {
+    "greet": "(A visitor has just walked up to George and hasn't said anything yet.)",
+    "goodbye": "(The visitor is walking away.)",
+}
+
+
 def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
                    set_led, wav_to_pcm16k, gain, seq_ref, transcribe=True,
                    session_id=None, phase="converse"):
@@ -916,6 +924,8 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
             data["asr_engine"] = ASR_ENGINE
     if instruction:
         data["instruction"] = instruction
+    if phase in _PHASE_NOTES:
+        data["user_note"] = _PHASE_NOTES[phase]   # ignored by gateways without it
     sid = session_id or SESSION_ID
     if sid:
         data["session_id"] = sid     # gateway threads conversation history per session

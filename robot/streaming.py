@@ -168,9 +168,10 @@ class Player:
     (16 kHz mono int16 bytes, seconds); ``play`` hands PCM to the speaker and
     returns at once; ``stop`` silences it."""
 
-    def __init__(self, to_pcm, play, stop, on_clip=None, on_active=None, drain_pad: float = 0.25) -> None:
+    def __init__(self, to_pcm, play, stop, on_clip=None, on_active=None, on_cut=None,
+                 drain_pad: float = 0.25) -> None:
         self._to_pcm, self._play, self._stop = to_pcm, play, stop
-        self._on_clip, self._on_active = on_clip, on_active
+        self._on_clip, self._on_active, self._on_cut = on_clip, on_active, on_cut
         self._drain_pad = drain_pad
         self._q: queue.Queue = queue.Queue()
         self._cut = threading.Event()
@@ -179,8 +180,10 @@ class Player:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def put(self, wav_bytes: bytes) -> None:
-        self._q.put(wav_bytes)
+    def put(self, wav_bytes: bytes, index=None) -> None:
+        """Queue one reply sentence; ``index`` is the gateway's sentence index,
+        reported back through ``on_cut`` if it is cut off mid-playback."""
+        self._q.put((wav_bytes, index))
 
     def flush(self) -> None:
         """Stop speaking now and forget everything queued."""
@@ -214,6 +217,7 @@ class Player:
                 continue
             if item is None:
                 break
+            item, index = item
             self._cut.clear()
             try:
                 pcm, dur = self._to_pcm(item)
@@ -223,6 +227,11 @@ class Player:
                 t0 = time.time()
                 self._play(pcm)                           # returns at once on the G1; tolerate a blocking one
                 cut = self._cut.wait(max(0.0, dur + 0.05 - (time.time() - t0)))   # until played, or interrupted
+                if cut and self._on_cut and index is not None and not self._closed:
+                    try:                                   # tell the gateway how much was heard
+                        self._on_cut(index, min(1.0, (time.time() - t0) / max(dur, 1e-3)))
+                    except Exception as e:
+                        print(f"[stream] cut report failed: {e}")
             except Exception as e:
                 print(f"[stream] play failed: {e}")
                 cut = True
@@ -270,7 +279,7 @@ class StreamSession:
         self._delays = []
         self._lock = threading.Lock()
         self.player = Player(to_pcm, play, stop_playback, on_clip=self._on_clip,
-                             on_active=self._on_playback, drain_pad=drain_pad)
+                             on_active=self._on_playback, on_cut=self._on_cut, drain_pad=drain_pad)
 
     # ---- configuration -------------------------------------------------------
     def _barge_in(self, o: dict) -> bool:
@@ -346,6 +355,17 @@ class StreamSession:
             self._aec.feed_far(pcm, at_sample=now)
         with self._lock:
             self._pending_clips.append((now, np.frombuffer(pcm, dtype=np.int16)))
+
+    def _on_cut(self, index: int, fraction: float) -> None:
+        """A reply sentence was cut off (barge-in): tell the gateway how much of it
+        was heard, so its history keeps only what George actually said."""
+        try:
+            if self._ws is not None:
+                self._ws.send_json({"type": "played", "state": "cut", "index": index,
+                                    "fraction": round(fraction, 3)})
+        except OSError:
+            pass
+        print(f"[stream] reply cut at sentence {index} ({fraction:.0%} played)")
 
     def _on_playback(self, active: bool) -> None:
         self.pub("speaking", on=active)
@@ -442,7 +462,7 @@ class StreamSession:
         elif kind == "audio":
             self._mark("first_audio")
             try:
-                self.player.put(base64.b64decode(ev["wav_base64"]))
+                self.player.put(base64.b64decode(ev["wav_base64"]), ev.get("index"))
             except Exception as e:
                 print(f"[stream] audio decode failed: {e}")
         elif kind == "done":
