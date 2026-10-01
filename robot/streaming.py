@@ -263,6 +263,10 @@ class StreamSession:
         # near-field barge-in gate: background level while George is silent, and
         # the gate's open/hangover state while he speaks
         self._ambient = []                 # frame RMS, last ~10 s with George silent
+        self._near_thresh = 0.0            # near-field level: background x mult (>= min)
+        self.last_near_voice = 0.0         # last frame loud enough to be the visitor up close
+        self._lvl = []                     # frame RMS since the last level log
+        self._lvl_t0 = time.time()
         self._loud_run = 0                 # consecutive frames above the gate
         self._gate_open_until = 0.0
         self._gate_peak = 0.0              # loudest frame since the gate opened (for the log)
@@ -397,24 +401,47 @@ class StreamSession:
             self._aec.flush_far()
 
     # ---- near-field barge-in gate -------------------------------------------
-    def _near_field_gate(self, frame: np.ndarray, o: dict) -> np.ndarray:
+    def _note_level(self, frame: np.ndarray, o: dict) -> float:
+        """Level bookkeeping for every frame (after echo cancellation): the room's
+        background (median RMS of the last ~10 s while George is silent), the
+        near-field threshold (background x mult, never below min), and
+        ``last_near_voice`` - the last frame loud enough to be the visitor up
+        close, which is what presence counts as "talking" (crowd speech isn't).
+        Logs a level summary every 5 s."""
+        f = frame.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(f * f)))
+        now = time.time()
+        if self._play_t0 is None:
+            self._ambient.append(rms)
+            if len(self._ambient) > 333:
+                del self._ambient[: len(self._ambient) - 333]
+        background = float(np.median(self._ambient)) if len(self._ambient) >= 30 else 0.0
+        self._near_thresh = max(float(o.get("barge_gate_min", 0.02)),
+                                background * float(o.get("barge_gate_mult", 3.0)))
+        if rms > self._near_thresh and self._play_t0 is None and len(self._ambient) >= 30:
+            self.last_near_voice = now           # (while George speaks his echo could count)
+        self._lvl.append(rms)
+        if now - self._lvl_t0 >= 5.0 and self._lvl:
+            lv = np.array(self._lvl)
+            print(f"[stream] mic: level p50 {np.median(lv):.3f} p90 {np.percentile(lv, 90):.3f} "
+                  f"max {lv.max():.3f} · background {background:.3f} · near-voice > {self._near_thresh:.3f} "
+                  f"({int((lv > self._near_thresh).sum())} frames)" + (" · George speaking" if self._play_t0 else ""))
+            self._lvl, self._lvl_t0 = [], now
+        return rms
+
+    def _near_field_gate(self, frame: np.ndarray, o: dict, rms: float) -> np.ndarray:
         """While George speaks, pass the mic only when it is clearly louder than
         the room: the visitor talking up close, not a crowd a few metres away
         (on the array the visitor is several times louder). Opens after 4 loud
         frames (120 ms) and stays open 0.5 s after the last one, so a sentence
         isn't chopped. When George is silent everything passes, and the frames
         update the background level."""
-        f = frame.astype(np.float32) / 32768.0
-        rms = float(np.sqrt(np.mean(f * f)))
         now = time.time()
-        if self._play_t0 is None:                          # George silent: learn the room
-            self._ambient.append(rms)
-            if len(self._ambient) > 333:                   # ~10 s of 30 ms frames
-                del self._ambient[: len(self._ambient) - 333]
+        if self._play_t0 is None:                          # George silent: everything passes
             self._loud_run, self._gate_open_until, self._gate_logged = 0, 0.0, False
             return frame
         background = float(np.median(self._ambient)) if len(self._ambient) >= 30 else 0.0
-        thresh = max(float(o.get("barge_gate_min", 0.02)), background * float(o.get("barge_gate_mult", 3.0)))
+        thresh = self._near_thresh
         self.status["barge_gate"] = {"background": round(background, 4), "threshold": round(thresh, 4)}
         if rms > thresh:
             self._loud_run += 1
@@ -580,11 +607,12 @@ class StreamSession:
                 if self._aec is not None:
                     frame = self._aec.process(frame)      # keeps adapting during the hold-off
                 o = self.opts()
+                rms = self._note_level(frame, o)          # background + near-field voice, every frame
                 hold = float(o.get("barge_holdoff_ms", 0) or 0)
                 if hold and self._play_t0 is not None and (time.time() - self._play_t0) * 1000.0 < hold:
                     frame = np.zeros_like(frame)          # reply just started: no echo barge-in
                 elif o.get("barge_gate"):
-                    frame = self._near_field_gate(frame, o)
+                    frame = self._near_field_gate(frame, o, rms)
                 if n % 3 == 0:
                     f = frame.astype(np.float32) / 32768.0
                     self.pub("vad", level=round(float(np.sqrt(np.mean(f * f))), 4), active=True)

@@ -106,13 +106,17 @@ DISARM_SECS = float(os.environ.get("PRESENCE_DISARM_SECS", "2.0"))  # absent -> 
 # Mid-conversation the visitor glances away, leans back, looks down: keep them
 # on a looser leash (smaller face + longer grace) than the arrival gate uses.
 STAY_FRAC        = float(os.environ.get("PRESENCE_STAY_FRAC", "0.12"))
-CONV_DISARM_SECS = float(os.environ.get("PRESENCE_CONV_DISARM_SECS", "5.0"))
+CONV_DISARM_SECS = float(os.environ.get("PRESENCE_CONV_DISARM_SECS", "3.0"))
+# No goodbye to someone who's already gone: skip it if the visitor's face was
+# last seen longer ago than this (it went to people 15 m away).
+GOODBYE_MAX_SECS = float(os.environ.get("PRESENCE_GOODBYE_MAX_SECS", "4.0"))
 # Speech keeps a streamed conversation alive only while SOMEONE is still in front
 # of the robot: a face at least NEAR_FRAC wide seen within FACE_GRACE_SECS. Speech
 # alone isn't enough: in a busy hall there is always speech, and George went on
 # talking to bystanders after the visitor had walked off.
 NEAR_FRAC        = float(os.environ.get("PRESENCE_NEAR_FRAC", "0.08"))
-FACE_GRACE_SECS  = float(os.environ.get("PRESENCE_FACE_GRACE_SECS", "5.0"))
+FACE_GRACE_SECS  = float(os.environ.get("PRESENCE_FACE_GRACE_SECS", "3.0"))
+NEAR_VOICE_SECS  = float(os.environ.get("PRESENCE_NEAR_VOICE_SECS", "2.0"))   # near-field speech keep-alive
 DEBUG       = os.environ.get("PRESENCE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 # --- Hands-free VAD capture --------------------------------------------------
@@ -1326,6 +1330,7 @@ class PresenceController(threading.Thread):
         # Fresh session per arrival: greeting + all turns + goodbye share history,
         # but a new visitor starts a clean conversation.
         self._session = f"g1p-{uuid.uuid4().hex[:8]}"
+        self._last_face_t = time.time()            # for the goodbye check
         _persona_instruction(self._session)        # persona -> this session's system prompt
         try:
             self.set_led(self.audio, 200, 120, 0)          # amber: thinking
@@ -1370,7 +1375,7 @@ class PresenceController(threading.Thread):
                         departed = True
                         break
                 else:
-                    self.last_seen = time.time()
+                    self.last_seen = self._last_face_t = time.time()
 
                 self.set_led(self.audio, 0, 200, 0)        # green: listening
                 if DEBUG:
@@ -1407,7 +1412,11 @@ class PresenceController(threading.Thread):
             # Say goodbye + wave only on a real departure (not on F2 disable).
             if departed:
                 self.vad.close()                # free the mic before the farewell
-                self._farewell()
+                gone = time.time() - self._last_face_t
+                if gone > GOODBYE_MAX_SECS:
+                    print(f"[presence] visitor already gone (last seen {gone:.0f}s ago) -> no goodbye")
+                else:
+                    self._farewell()
         except Exception as e:
             print(f"[presence] greet/converse error: {e}")
         finally:
@@ -1466,12 +1475,15 @@ class PresenceController(threading.Thread):
                     frac = self.detector.nearest_face_frac()
                     if frac >= NEAR_FRAC:
                         last_face[0] = now
+                        self._last_face_t = now
                     # A turn in progress counts as presence (the visitor's face can
                     # drop below the stay gate while they talk, or George is still
                     # replying), but only while someone is actually there: crowd
                     # speech with nobody in front must not keep it going.
+                    # "talking" = George replying, or speech loud enough to be the
+                    # visitor up close (near-field); crowd chatter doesn't count.
                     talking = (session.player.active
-                               or now - session.last_activity < CONV_DISARM_SECS)
+                               or now - session.last_near_voice < NEAR_VOICE_SECS)
                     someone = now - last_face[0] < FACE_GRACE_SECS
                     if frac >= STAY_FRAC or (talking and someone):
                         self.last_seen = now
