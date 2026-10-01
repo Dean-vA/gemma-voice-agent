@@ -22,3 +22,11 @@ compressed-tensors>=0.8
 librosa>=0.10
 soundfile>=0.12
 numpy>=1.26
+
+# Streamed voice loop (/ws/converse): Silero VAD + Smart Turn, both on CPU via
+# onnxruntime (no VRAM). silero-vad is only used for its packaged ONNX model.
+silero-vad>=6.0
+onnxruntime>=1.18
+
+# Optional Parakeet TDT transcription (pure-PyTorch, uses the image's torch)
+nano-parakeet>=0.2.0

@@ -15,13 +15,20 @@ class TTSClient:
         self.base_url = base_url.rstrip("/")
         self.voice = voice
         self._client = httpx.AsyncClient(timeout=120)
+        self._down: tuple[float, dict] | None = None   # (when, result) of the last failed probe
 
     async def health(self) -> dict:
+        # An engine that isn't deployed costs seconds per probe (failed DNS), and
+        # the UI asks every few seconds: remember a failure for a little while.
+        if self._down is not None and time.monotonic() - self._down[0] < 30.0:
+            return self._down[1]
         try:
-            r = await self._client.get(f"{self.base_url}/health")
+            r = await self._client.get(f"{self.base_url}/health", timeout=3.0)
+            self._down = None
             return r.json() | {"reachable": True}
         except Exception as exc:  # noqa: BLE001
-            return {"reachable": False, "error": str(exc)}
+            self._down = (time.monotonic(), {"reachable": False, "error": str(exc)})
+            return self._down[1]
 
     async def synthesize(self, text: str) -> tuple[bytes, dict]:
         """Return (wav_bytes, timing).

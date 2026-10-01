@@ -4,4 +4,5 @@ __pycache__/
 .venv/
 venv/
 samples/*.wav
+samples/asr/
 .DS_Store

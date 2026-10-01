@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 import numpy as np
@@ -21,6 +21,18 @@ class Turn:
     text: str = ""
     audio: np.ndarray | None = None
     image: bytes | None = None
+
+
+@dataclass
+class TurnState:
+    """Progress of an in-flight turn, readable by whoever may cancel it."""
+
+    user_text: str = ""
+    parts: list[str] = field(default_factory=list)
+
+    @property
+    def reply(self) -> str:
+        return "".join(self.parts)
 
 
 class ChatBackend(abc.ABC):
@@ -45,11 +57,14 @@ class ChatBackend(abc.ABC):
         instruction: str,
         max_new_tokens: int,
         user_image: bytes | None = None,
+        user_text: str | None = None,
     ) -> AsyncIterator[str]:
         """Yield response text chunks as they are generated.
 
         ``user_image`` is optional encoded image bytes (JPEG/PNG) shown with the
-        current turn; placed before audio in the prompt.
+        current turn; placed before audio in the prompt. ``user_text``, when
+        given, is a transcript of the turn and is sent *instead of* the audio
+        (cascaded ASR -> LLM mode).
         """
         raise NotImplementedError
         yield ""  # pragma: no cover  (makes this an async generator)
