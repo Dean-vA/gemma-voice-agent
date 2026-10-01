@@ -57,13 +57,7 @@ class SpeechStopped:
 
 class Segmenter:
     def __init__(self, config: VADConfig | None = None) -> None:
-        cfg = self.cfg = config or VADConfig()
-        self._min_silence_samples = int(SAMPLE_RATE * cfg.min_silence_ms / 1000)
-        self._pad_samples = int(SAMPLE_RATE * cfg.speech_pad_ms / 1000)
-        if cfg.min_speech_continuation_ms <= 0:
-            self._continuation_ms = cfg.min_speech_ms
-        else:
-            self._continuation_ms = min(cfg.min_speech_ms, max(_MIN_FRAGMENT_MS, cfg.min_speech_continuation_ms))
+        self.configure(config or VADConfig())
         # Set by the turn manager: can speech starting at this stream offset
         # still reopen the previous turn?
         self.reopenable: Callable[[int], bool] = lambda start_sample: False
@@ -71,6 +65,16 @@ class Segmenter:
         self._pre_speech: deque[np.ndarray] = deque()
         self._pre_speech_samples = 0
         self._reset_segment()
+
+    def configure(self, cfg: VADConfig) -> None:
+        """Apply new thresholds; safe mid-stream (takes effect from the next chunk)."""
+        self.cfg = cfg
+        self._min_silence_samples = int(SAMPLE_RATE * cfg.min_silence_ms / 1000)
+        self._pad_samples = int(SAMPLE_RATE * cfg.speech_pad_ms / 1000)
+        if cfg.min_speech_continuation_ms <= 0:
+            self._continuation_ms = cfg.min_speech_ms
+        else:
+            self._continuation_ms = min(cfg.min_speech_ms, max(_MIN_FRAGMENT_MS, cfg.min_speech_continuation_ms))
 
     def _reset_segment(self) -> None:
         self.triggered = False
