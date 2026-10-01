@@ -859,7 +859,10 @@ button.primary.on{background:linear-gradient(90deg,var(--acc),#2bb87c);color:#04
 .flow.casc,.linklbl.casc{display:none}
 .cascade .flow.casc{display:inline;stroke:#c792ea;stroke-dasharray:5 5}
 .cascade .linklbl.casc{display:inline;fill:#c792ea}
-.cascade .flow.a2l{opacity:.22}
+.cascade .flow.a2l{display:none}
+.flow.onlycasc{display:none}
+.cascade .flow.onlycasc{display:inline}
+.cascade .flow.notcasc{display:none}
 .node.talking .nlat{fill:var(--acc)}
 .eqbar{fill:var(--acc);opacity:0;transform-box:fill-box;transform-origin:center bottom}
 .node.talking .eqbar{opacity:1;animation:eq .66s ease-in-out infinite}
@@ -1115,7 +1118,7 @@ const LINKS=[
   {a:'mic',b:'audio_decode',flow:1,lbl:'audio'},
   {a:'cam',b:'llm',top:1,flow:1,img:1,lbl:'image'},
   {a:'audio_decode',b:'llm',flow:1,a2l:1},
-  {a:'audio_decode',b:'asr',flow:1},
+  {a:'audio_decode',b:'asr',flow:1,toasr:1},
   {a:'llm',b:'tts',v:1,flow:1},        // Gemma -> kokoro (down)
   {a:'tts',b:'spk',flow:1},            // kokoro -> Speaker
   {a:'llm',b:'reply',flow:1},          // Gemma -> REPLY text (right)
@@ -1145,13 +1148,14 @@ const LINKS_WS=[
   {a:'vad',b:'smart_turn',v:1,flow:1},
   {a:'smart_turn',b:'reopen_grace',v:1,flow:1},
   {a:'reopen_grace',b:'llm',flow:1,a2l:1},
-  {a:'reopen_grace',b:'asr',flow:1},
+  {a:'reopen_grace',b:'asr',flow:1,toasr:1},
   {a:'llm',b:'tts',v:1,flow:1},
   {a:'tts',b:'spk',flow:1},
   {a:'llm',b:'reply',flow:1},
   {a:'asr',b:'heard',flow:1},
   {a:'asr',b:'llm',casc:1,lbl:'transcript'},
 ];
+const CASC_LANE=430;   // x of the cascade transcript lane, in the gap left of the Gemma/ASR column
 const DIAG={mode:null,nodes:N,gw:['audio_decode','asr','llm','tts']};
 function build(mode){
   const ws=mode==='ws', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
@@ -1177,17 +1181,22 @@ function build(mode){
                   // arrowhead bridges it, so the line meets the arrow's BACK CENTRE.
   LNK.forEach(L=>{
     let ax,ay,bx,by,d;
-    if(L.casc){ax=NODES[L.a].x;ay=cyN(L.a)+14;bx=NODES[L.b].x-GAP;by=NODES[L.b].y+NODES[L.b].h-16;
-      const cx=NODES[L.a].x-30;d=`M${ax} ${ay} C${cx} ${ay}, ${cx} ${by}, ${bx} ${by}`;}
+    if(L.casc){   // ASR upper-left -> lane -> Gemma lower-left (clear of the ASR feed below)
+      const cx=CASC_LANE,r=6; ax=NODES[L.a].x;ay=NODES[L.a].y+16;bx=NODES[L.b].x-GAP;by=NODES[L.b].y+NODES[L.b].h-18;
+      d=`M${ax} ${ay} L${cx+r} ${ay} Q${cx} ${ay} ${cx} ${ay-r} L${cx} ${by+r} Q${cx} ${by} ${cx+r} ${by} L${bx} ${by}`;}
     else if(L.v){ax=cxN(L.a);ay=NODES[L.a].y+NODES[L.a].h;bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} L${bx} ${by}`;}
     else if(L.top){ax=rxN(L.a);ay=cyN(L.a);bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${bx} ${ay}, ${bx} ${by}`;}
     else{ax=rxN(L.a);ay=cyN(L.a);bx=NODES[L.b].x-GAP;by=cyN(L.b);d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${(ax+bx)/2} ${by}, ${bx} ${by}`;}
-    const cls=L.casc?'flow casc':(L.flow?('flow'+(L.img?' img':'')+(L.a2l?' a2l':'')):('link'+(L.arm?' arm':'')));
+    const cls=L.casc?'flow casc':(L.flow?('flow'+(L.img?' img':'')+(L.a2l?' a2l':'')+(L.toasr?' notcasc':'')):('link'+(L.arm?' arm':'')));
     svg.appendChild(E('path',{class:cls,d:d,'marker-end':'url(#arr)'}));
+    if(L.toasr){  // cascade: elbow on its own lane into ASR's lower-left, under the transcript lane
+      const r=6, vx=rxN(L.a)+12, ey=NODES[L.b].y+NODES[L.b].h-22, sx=rxN(L.a), sy=cyN(L.a), ex=NODES[L.b].x-GAP;
+      const de=`M${sx} ${sy} L${vx-r} ${sy} Q${vx} ${sy} ${vx} ${sy+r} L${vx} ${ey-r} Q${vx} ${ey} ${vx+r} ${ey} L${ex} ${ey}`;
+      svg.appendChild(E('path',{class:'flow onlycasc',d:de,'marker-end':'url(#arr)'}));}
     if(L.lbl){let lx=(ax+bx)/2,ly=(ay+by)/2-5,anc='middle';
       if(L.img){lx=ax+(bx-ax)*0.26;ly=ay-7;}
       if(L.v){lx=ax+15;ly=(ay+by)/2+3;anc='start';}
-      if(L.casc){lx=NODES[L.a].x-30;ly=(ay+by)/2;anc='middle';}   // vertical, beside the arrow
+      if(L.casc){lx=CASC_LANE+11;ly=(ay+by)/2;anc='middle';}   // vertical, right of the lane
       const la={class:'linklbl'+(L.casc?' casc':''),'text-anchor':anc,x:lx,y:ly};
       if(L.casc)la.transform=`rotate(-90 ${lx} ${ly})`;
       svg.appendChild(T(L.lbl,la));}
