@@ -9,6 +9,7 @@ follows.
 Client -> server
     binary frames            int16 mono PCM at 16 kHz, any frame size
     {"type": "config", session_id?, instruction?, transcribe?, asr_engine?, llm_input?, speak?, engine?,
+                       debug_prompt?,   true: each `done` carries the text-only prompt sent to the LLM
                        respond?,    respond=false: detect turns only, generate no reply
                        vad?}        per-connection overrides of the gateway's turn-detection
                                     settings (any of VAD_OPTIONS below), applied live
@@ -122,6 +123,7 @@ class RealtimeSession:
         self.speak = True
         self.engine = ""
         self.respond = True
+        self.debug_prompt = False
 
         self._image: bytes | None = None
         self._playing = False             # client reports TTS playback in progress
@@ -204,6 +206,7 @@ class RealtimeSession:
             self.speak = bool(msg.get("speak", self.speak))
             self.engine = msg.get("engine") or ""
             self.respond = bool(msg.get("respond", True))
+            self.debug_prompt = bool(msg.get("debug_prompt", False))
             if isinstance(msg.get("vad"), dict):
                 await self._apply_vad_options(msg["vad"])
             # No id = the client wants a fresh session (first connect, or Reset).
@@ -374,6 +377,7 @@ class RealtimeSession:
                         transcribe=self.transcribe, asr_engine=self.asr_engine, llm_input=self.llm_input,
                         speak=self.speak, engine=self.engine,
                         image_bytes=turn.image, state=turn.state, commit=False,
+                        debug_prompt=self.debug_prompt,
                     ):
                         queue.put_nowait(item)
                 except Exception as exc:  # noqa: BLE001

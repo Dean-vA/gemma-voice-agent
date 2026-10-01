@@ -178,6 +178,9 @@ async def _stream_reply(session_id: str, samples, instruction: str, timer: TurnT
     settings = app.state.settings
     history = SESSIONS.setdefault(session_id, [])
     system_prompt = PERSONAS.get(session_id) or settings.system_prompt
+    if state.prompt is not None:
+        state.prompt[:] = app.state.backend.describe_prompt(
+            system_prompt, history, samples, instruction, user_image=image_bytes, user_text=user_text)
     async for chunk in app.state.backend.stream(
         system_prompt, history, samples, instruction,
         settings.max_new_tokens, user_image=image_bytes, user_text=user_text,
@@ -206,7 +209,8 @@ def commit_turn(session_id: str, state: TurnState, samples, image_bytes: bytes |
 async def turn_events(session_id: str, samples, instruction: str, timer: TurnTimer, *,
                       transcribe: bool = False, asr_engine: str = "", speak: bool = False, engine: str = "",
                       image_bytes: bytes | None = None, state: TurnState | None = None,
-                      commit: bool = True, llm_input: str = "", user_note: str = ""):
+                      commit: bool = True, llm_input: str = "", user_note: str = "",
+                      debug_prompt: bool = False):
     """Run one turn and yield ``(event, data)`` pairs.
 
     Events: ``transcript`` (user's words, if requested), ``token`` (text),
@@ -216,8 +220,12 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     passes ``state`` and ``commit=False`` because it decides itself when (and
     whether) the turn enters the history. ``user_note`` is stored as the user's
     line when there is no transcript (e.g. a greeting made from silence).
+    ``debug_prompt`` adds ``prompt`` to ``done``: a text-only copy of exactly
+    what was sent to the LLM (system, history, this turn).
     """
     state = state if state is not None else TurnState()
+    if debug_prompt:
+        state.prompt = []
     llm_text, transcribed = await _hear(samples, instruction, timer, state, transcribe=transcribe,
                                         asr_engine=asr_engine, llm_input=llm_input)
     if transcribed:
@@ -263,7 +271,10 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
         if user_note and not state.user_text:
             state.user_text = user_note
         commit_turn(session_id, state, samples, image_bytes)
-    yield "done", {"reply": reply, "metrics": metrics.as_dict()}
+    done = {"reply": reply, "metrics": metrics.as_dict()}
+    if state.prompt is not None:
+        done["prompt"] = state.prompt
+    yield "done", done
 
 
 async def _read_image(image: UploadFile | None) -> bytes | None:
@@ -326,13 +337,15 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
 @app.post("/converse")
 async def converse(audio: UploadFile, session_id: str = Form(None), instruction: str = Form(""),
                    transcribe: bool = Form(False), asr_engine: str = Form(""), llm_input: str = Form(""),
-                   engine: str = Form(""), image: UploadFile = File(None), user_note: str = Form("")):
+                   engine: str = Form(""), image: UploadFile = File(None), user_note: str = Form(""),
+                   debug_prompt: bool = Form(False)):
     """Voice loop: audio in -> Gemma streams text -> sentence-chunked TTS -> audio out.
 
     Streams SSE: `transcript` (user's words, if requested), `token` (text),
     `audio` (base64 wav per sentence), `done` (metrics). `engine` selects
     which TTS service to use. `user_note` is what the history records as the
     user's turn when nothing was transcribed (e.g. "(the visitor walked up)").
+    `debug_prompt` adds the exact (text-only) prompt sent to the LLM to `done`.
     """
     sid = session_id or uuid.uuid4().hex
     audio_bytes = await audio.read()
@@ -343,7 +356,7 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
     decoded, timer = _decode(audio_bytes)
     return _sse_turn(sid, decoded, timer, instruction, transcribe=transcribe, asr_engine=asr_engine,
                      llm_input=llm_input, speak=True, engine=engine, image_bytes=image_bytes,
-                     user_note=user_note)
+                     user_note=user_note, debug_prompt=debug_prompt)
 
 
 @app.websocket("/ws/converse")
