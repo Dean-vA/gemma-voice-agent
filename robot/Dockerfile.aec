@@ -1,0 +1,26 @@
+# Echo-cancellation sidecar for the robot (see aec.py / aec_server.py).
+#
+# The canceller is GStreamer's webrtcdsp + webrtcechoprobe, the elements the
+# Reachy Mini SDK uses. It needs a *current* GStreamer: from 1.24 these wrap
+# WebRTC's AEC3, which finds the speaker delay by itself. Ubuntu 20.04/22.04
+# (what Jetson images are built on) ship an older canceller that only works when
+# the delay is known to ~20 ms. So instead of touching the client image, this
+# runs the canceller in its own small Debian container next to it.
+#
+#   docker compose -f docker-compose.jetson.yml build aec
+#   docker compose -f docker-compose.jetson.yml up -d aec
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-numpy python3-gi \
+        gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+        gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY aec.py aec_server.py ./
+# fail the build, not the robot, if the elements are missing
+RUN python3 -c "import aec; assert aec.EchoCanceller.available(), aec.EchoCanceller.unavailable_reason()"
+
+ENV AEC_BIND=127.0.0.1:5005 PYTHONUNBUFFERED=1
+CMD ["python3", "aec_server.py"]

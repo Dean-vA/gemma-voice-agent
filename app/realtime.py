@@ -9,12 +9,15 @@ follows.
 Client -> server
     binary frames            int16 mono PCM at 16 kHz, any frame size
     {"type": "config", session_id?, instruction?, transcribe?, asr_engine?, llm_input?, speak?, engine?,
-                       respond?}    respond=false: detect turns only, generate no reply
+                       respond?,    respond=false: detect turns only, generate no reply
+                       vad?}        per-connection overrides of the gateway's turn-detection
+                                    settings (any of VAD_OPTIONS below), applied live
     {"type": "image", "data": <base64 jpeg/png> | null}   still for the next turn
     {"type": "playback", "active": bool}                  client is playing TTS
 
 Server -> client  ({"type": <event>, ...})
     session         {session_id}
+    vad_config      {<every VAD option and its effective value>, smart_turn_available}
     speech_started  {audio_start_ms}                     once per turn
     speech_stopped  {audio_start_ms, audio_end_ms}       once per turn, when it is final
     cancelled       {reason: "barge_in"}                 stop/drop the current reply
@@ -54,6 +57,24 @@ log = logging.getLogger(__name__)
 # How long a release waits on unconfirmed speech before giving up on it
 # (SpeculativeTurnTracker._PENDING_REOPEN_WAIT_TIMEOUT_S upstream).
 _PENDING_REOPEN_TIMEOUT_S = 2.0
+
+
+# Turn-detection options a client may override for its own connection: name ->
+# (type, min, max). Everything else stays whatever the gateway was started with.
+VAD_OPTIONS: dict[str, tuple[type, float, float]] = {
+    "vad_threshold": (float, 0.05, 0.95),
+    "vad_min_silence_ms": (int, 32, 3000),
+    "vad_min_speech_ms": (int, 32, 3000),
+    "vad_min_speech_continuation_ms": (int, 0, 3000),
+    "vad_speech_pad_ms": (int, 0, 2000),
+    "smart_turn": (bool, 0, 1),
+    "smart_turn_threshold": (float, 0.0, 1.0),
+    "smart_turn_max_wait_ms": (int, 1, 10000),
+    "smart_turn_incomplete_delay_ms": (int, 0, 10000),
+    "reopen_ms": (int, 0, 10000),
+    "unanswered_reopen_ms": (int, 0, 60000),
+    "vad_barge_in": (bool, 0, 1),
+}
 
 
 def _ms(samples: int) -> float:
@@ -104,20 +125,13 @@ class RealtimeSession:
             await self.ws.close()
             return
 
-        s = self.settings
         self.silero = vad.silero.stream()
-        self.smart_turn = vad.smart_turn
-        self.segmenter = Segmenter(VADConfig(
-            threshold=s.vad_threshold,
-            min_silence_ms=s.vad_min_silence_ms,
-            min_speech_ms=s.vad_min_speech_ms,
-            min_speech_continuation_ms=s.vad_min_speech_continuation_ms,
-            speech_pad_ms=s.vad_speech_pad_ms,
-        ))
+        self._smart_turn_model = vad.smart_turn
+        # This connection's turn-detection options: the gateway's settings,
+        # until the client overrides some in a config message.
+        self.opts = {name: getattr(self.settings, name) for name in VAD_OPTIONS}
+        self.segmenter = Segmenter(self._vad_config())
         self.segmenter.reopenable = self._reopenable
-        self._unanswered_reopen_ms = max(
-            s.reopen_ms, s.unanswered_reopen_ms, s.smart_turn_max_wait_ms if self.smart_turn is not None else 0
-        )
         try:
             while True:
                 msg = await self.ws.receive()
@@ -133,6 +147,38 @@ class RealtimeSession:
             if self._turn is not None:
                 await self._cancel(self._turn)
 
+    # ---- per-connection turn-detection options ------------------------------
+    @property
+    def smart_turn(self):
+        """The Smart Turn model, or None when unavailable or switched off for this connection."""
+        return self._smart_turn_model if self.opts["smart_turn"] else None
+
+    @property
+    def _unanswered_reopen_ms(self) -> int:
+        o = self.opts
+        return max(o["reopen_ms"], o["unanswered_reopen_ms"],
+                   o["smart_turn_max_wait_ms"] if self.smart_turn is not None else 0)
+
+    def _vad_config(self) -> VADConfig:
+        o = self.opts
+        return VADConfig(threshold=o["vad_threshold"], min_silence_ms=o["vad_min_silence_ms"],
+                         min_speech_ms=o["vad_min_speech_ms"],
+                         min_speech_continuation_ms=o["vad_min_speech_continuation_ms"],
+                         speech_pad_ms=o["vad_speech_pad_ms"])
+
+    async def _apply_vad_options(self, overrides: dict) -> None:
+        for name, value in overrides.items():
+            spec = VAD_OPTIONS.get(name)
+            if spec is None or value is None:
+                continue
+            kind, lo, hi = spec
+            try:
+                self.opts[name] = bool(value) if kind is bool else kind(min(hi, max(lo, float(value))))
+            except (TypeError, ValueError):
+                continue
+        self.segmenter.configure(self._vad_config())
+        await self._send("vad_config", {**self.opts, "smart_turn_available": self._smart_turn_model is not None})
+
     # ---- client messages -----------------------------------------------------
     async def _on_message(self, msg: dict) -> None:
         kind = msg.get("type")
@@ -144,6 +190,8 @@ class RealtimeSession:
             self.speak = bool(msg.get("speak", self.speak))
             self.engine = msg.get("engine") or ""
             self.respond = bool(msg.get("respond", True))
+            if isinstance(msg.get("vad"), dict):
+                await self._apply_vad_options(msg["vad"])
             # No id = the client wants a fresh session (first connect, or Reset).
             sid = msg.get("session_id") or uuid.uuid4().hex
             if sid != self.session_id:
@@ -166,7 +214,7 @@ class RealtimeSession:
     async def _on_chunk(self, chunk: np.ndarray) -> None:
         # Barge-in disabled: don't listen while the robot is replying/speaking,
         # so its own voice can't start a turn.
-        if not self.settings.vad_barge_in and self._replying():
+        if not self.opts["vad_barge_in"] and self._replying():
             if not self._gated:
                 self._gated = True
                 self.silero.reset()
@@ -233,10 +281,10 @@ class RealtimeSession:
 
     def _grace(self, complete: bool | None) -> tuple[float, float]:
         """(reopen grace, processing delay) in seconds for a soft end."""
-        s = self.settings
+        o = self.opts
         if complete is None or complete:  # Smart Turn off/failed, or turn sounds complete
-            return s.reopen_ms / 1000.0, 0.0
-        return s.smart_turn_max_wait_ms / 1000.0, min(s.smart_turn_incomplete_delay_ms, s.smart_turn_max_wait_ms) / 1000.0
+            return o["reopen_ms"] / 1000.0, 0.0
+        return o["smart_turn_max_wait_ms"] / 1000.0, min(o["smart_turn_incomplete_delay_ms"], o["smart_turn_max_wait_ms"]) / 1000.0
 
     async def _respond(self, turn: _Turn, ev: SpeechStopped, soft_end: float) -> None:
         """Prepare the reply to a soft-ended turn; release it once the grace has passed."""
@@ -248,11 +296,12 @@ class RealtimeSession:
             timer.add_span("endpoint", _ms(ev.end_sample - ev.last_speech_sample))
 
             complete: bool | None = None
-            if self.smart_turn is not None:
+            smart_turn = self.smart_turn
+            if smart_turn is not None:
                 t0 = time.perf_counter()
                 try:
-                    prob = await asyncio.to_thread(self.smart_turn.predict, turn.audio)
-                    complete = prob > self.settings.smart_turn_threshold
+                    prob = await asyncio.to_thread(smart_turn.predict, turn.audio)
+                    complete = prob > self.opts["smart_turn_threshold"]
                     timer.add_span("smart_turn", (time.perf_counter() - t0) * 1000.0,
                                    probability=round(prob, 3), complete=complete)
                 except Exception:  # noqa: BLE001
