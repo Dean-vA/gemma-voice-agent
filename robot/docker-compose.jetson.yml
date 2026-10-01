@@ -113,6 +113,10 @@ services:
       - PRESENCE_BARGE_IN=${PRESENCE_BARGE_IN:-1}
       - PRESENCE_AEC=${PRESENCE_AEC:-1}                       # echo cancellation (needs the aec service)
       - PRESENCE_AEC_URL=${PRESENCE_AEC_URL:-127.0.0.1:5005}
+      # measured on this robot (speaker delay ~0.4 s): canceller auto-gain off,
+      # reference placed 300 ms after send -> 10-18 dB of George's echo removed
+      - PRESENCE_AEC_AGC=${PRESENCE_AEC_AGC:-0}
+      - PRESENCE_AEC_DELAY_MS=${PRESENCE_AEC_DELAY_MS:-300}
       - PRESENCE_STREAM_MIC_GAIN=${PRESENCE_STREAM_MIC_GAIN:-auto}
       - PRESENCE_BARGE_HOLDOFF_MS=${PRESENCE_BARGE_HOLDOFF_MS:-1000}  # no barge-in for the first 1 s of a reply (echo)
       # near-field barge-in: while George speaks, only sound > background x MULT gets through

@@ -210,7 +210,9 @@ STREAM = {
     "aec": os.environ.get("PRESENCE_AEC", "1").strip().lower() in ("1", "true", "yes", "on"),
     "aec_delay_ms": os.environ.get("PRESENCE_AEC_DELAY_MS", "auto"),   # "auto" or a figure in ms
     "aec_noise_suppression": os.environ.get("PRESENCE_AEC_NS", "1").strip().lower() in ("1", "true", "yes", "on"),
-    "aec_gain_control": os.environ.get("PRESENCE_AEC_AGC", "1").strip().lower() in ("1", "true", "yes", "on"),
+    # Off by default: measured on the robot, the canceller's auto-gain amplified the
+    # residual echo (p90 0.10 in -> 0.16 out); without it 10-18 dB of echo is removed.
+    "aec_gain_control": os.environ.get("PRESENCE_AEC_AGC", "0").strip().lower() in ("1", "true", "yes", "on"),
     # gain applied to the mic before streaming; "auto" = STREAM_ARRAY_GAIN for
     # the (quiet) G1 array, 1.0 for a USB mic
     "mic_gain": os.environ.get("PRESENCE_STREAM_MIC_GAIN", "auto"),

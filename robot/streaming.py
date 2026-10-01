@@ -264,6 +264,8 @@ class StreamSession:
         # the gate's open/hangover state while he speaks
         self._ambient = []                 # frame RMS, last ~10 s with George silent
         self._near_thresh = 0.0            # near-field level: background x mult (>= min)
+        self._play_lvl = []                # post-AEC frame RMS while George speaks (echo residual), last ~10 s
+        self._play_thresh = 0.0            # gate threshold while George speaks
         self.last_near_voice = 0.0         # last frame loud enough to be the visitor up close
         self._lvl = []                     # frame RMS since the last level log
         self._lvl_t0 = time.time()
@@ -415,9 +417,17 @@ class StreamSession:
             self._ambient.append(rms)
             if len(self._ambient) > 333:
                 del self._ambient[: len(self._ambient) - 333]
+        else:
+            self._play_lvl.append(rms)
+            if len(self._play_lvl) > 333:
+                del self._play_lvl[: len(self._play_lvl) - 333]
         background = float(np.median(self._ambient)) if len(self._ambient) >= 30 else 0.0
         self._near_thresh = max(float(o.get("barge_gate_min", 0.02)),
                                 background * float(o.get("barge_gate_mult", 3.0)))
+        # While George speaks the gate must also clear his own leftover echo: 1.5x
+        # its recent 90th percentile (the visitor up close measured 0.3-0.4, far above).
+        echo_p90 = float(np.percentile(self._play_lvl, 90)) if len(self._play_lvl) >= 30 else 0.0
+        self._play_thresh = max(self._near_thresh, echo_p90 * float(o.get("barge_echo_mult", 1.5)))
         if rms > self._near_thresh and self._play_t0 is None and len(self._ambient) >= 30:
             self.last_near_voice = now           # (while George speaks his echo could count)
         self._lvl.append(rms)
@@ -425,7 +435,8 @@ class StreamSession:
             lv = np.array(self._lvl)
             print(f"[stream] mic: level p50 {np.median(lv):.3f} p90 {np.percentile(lv, 90):.3f} "
                   f"max {lv.max():.3f} · background {background:.3f} · near-voice > {self._near_thresh:.3f} "
-                  f"({int((lv > self._near_thresh).sum())} frames)" + (" · George speaking" if self._play_t0 else ""))
+                  f"({int((lv > self._near_thresh).sum())} frames)"
+                  + (f" · George speaking: echo p90 {echo_p90:.3f}, barge-in > {self._play_thresh:.3f}" if self._play_t0 else ""))
             self._lvl, self._lvl_t0 = [], now
         return rms
 
@@ -441,7 +452,7 @@ class StreamSession:
             self._loud_run, self._gate_open_until, self._gate_logged = 0, 0.0, False
             return frame
         background = float(np.median(self._ambient)) if len(self._ambient) >= 30 else 0.0
-        thresh = self._near_thresh
+        thresh = self._play_thresh
         self.status["barge_gate"] = {"background": round(background, 4), "threshold": round(thresh, 4)}
         if rms > thresh:
             self._loud_run += 1
