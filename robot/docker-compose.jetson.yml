@@ -101,6 +101,8 @@ services:
       # transcript for the HEARD box: on by default (extra ASR Gemma call ~+latency;
       # set PRESENCE_TRANSCRIBE=0 at `up` time for minimum latency / no HEARD)
       - PRESENCE_TRANSCRIBE=${PRESENCE_TRANSCRIBE:-1}
+      # log what Gemma was sent each turn ([gemma] -> / <-) + Conversation panel prompts
+      - PRESENCE_LOG_PROMPTS=${PRESENCE_LOG_PROMPTS:-1}
       # gateway pipeline (also switchable live in the control centre): empty = gateway default
       - PRESENCE_ASR_ENGINE=${PRESENCE_ASR_ENGINE:-}     # gemma | parakeet
       - PRESENCE_LLM_INPUT=${PRESENCE_LLM_INPUT:-}       # audio | transcript (cascade via Parakeet)

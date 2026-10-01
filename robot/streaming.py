@@ -255,8 +255,10 @@ class StreamSession:
     """
 
     def __init__(self, url, session_id, opts, mic, play, stop_playback, to_pcm, pub=None,
-                 grab_image=None, set_led=None, drain_pad: float = 0.25, echo_delay_ms=None) -> None:
+                 grab_image=None, set_led=None, drain_pad: float = 0.25, echo_delay_ms=None,
+                 on_prompt=None) -> None:
         self.url, self.session_id, self.opts = url, session_id, opts
+        self.on_prompt = on_prompt        # (prompt, reply) -> None, e.g. a log line
         self.mic, self.pub = mic, (pub or (lambda *a, **k: None))
         self.grab_image, self.set_led = grab_image, (set_led or (lambda *a: None))
         # echo_delay_ms: the speaker delay measured in an earlier session, if any
@@ -308,6 +310,7 @@ class StreamSession:
         return {"type": "config", "session_id": self.session_id, "instruction": o.get("instruction", ""),
                 "transcribe": bool(o.get("transcribe")), "asr_engine": o.get("asr_engine", ""),
                 "llm_input": o.get("llm_input", ""), "speak": True, "engine": o.get("tts_engine", ""),
+                "debug_prompt": bool(o.get("debug_prompt")),
                 "vad": {**o.get("vad", {}), "vad_barge_in": self.status["barge_in"]}}
 
     def _sync_options(self, o: dict) -> None:
@@ -470,8 +473,15 @@ class StreamSession:
             self.pub("turn", ev="metrics", metrics=metrics)
             total = (time.perf_counter() - self._turn_t0) * 1000 if self._turn_t0 else None
             reply = "".join(self._reply) or ev.get("reply", "")
-            self.pub("turn", ev="done", metrics=metrics, heard=self._heard, reply=reply, total_ms=total)
+            prompt = ev.get("prompt")
+            self.pub("turn", ev="done", metrics=metrics, heard=self._heard, reply=reply, total_ms=total,
+                     prompt=prompt)
             print(f"[stream] reply: {reply!r}")
+            if self.on_prompt and prompt:
+                try:
+                    self.on_prompt(prompt, reply)
+                except Exception as e:
+                    print(f"[stream] prompt log failed: {e}")
         elif kind == "cancelled":
             self._interrupt()
             if self._turn_t0 is not None:

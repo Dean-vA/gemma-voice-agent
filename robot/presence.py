@@ -152,6 +152,31 @@ SPEAK_DRAIN_PAD = float(os.environ.get("PRESENCE_DRAIN_PAD", "0.25"))  # post-pl
 # Transcript echo costs a separate ASR pass on the gateway (the model is
 # audio-native and doesn't need it). Off by default for latency; PRESENCE_TRANSCRIBE=1
 # turns it back on so the `heard:` line shows what the VAD captured.
+# Ask the gateway for the exact (text-only) prompt Gemma answered from, log it
+# per turn ("[gemma] -> / <-") and show it in the control centre's Conversation
+# panel. Ignored by gateways without debug_prompt.
+LOG_PROMPTS = os.environ.get("PRESENCE_LOG_PROMPTS", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _clip(text, n):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _log_prompt(prompt, reply):
+    """One compact block per turn: what Gemma got, and what it said back."""
+    if not prompt:
+        return
+    system = next((m["content"] for m in prompt if m.get("role") == "system"), "")
+    history = [m for m in prompt[1:-1] if m.get("role") in ("user", "assistant")]
+    print(f'[gemma] -> system: "{_clip(system, 90)}" · history: {len(history) // 2} exchange(s)')
+    for m in history[-4:]:                         # the most recent context, briefly
+        who = "visitor" if m["role"] == "user" else "George "
+        print(f'[gemma]      {who}: "{_clip(m.get("content", ""), 110)}"')
+    print(f'[gemma] -> turn: "{_clip(prompt[-1].get("content", ""), 400)}"')
+    print(f'[gemma] <- "{_clip(reply, 300)}"')
+
+
 CONV_TRANSCRIBE = os.environ.get("PRESENCE_TRANSCRIBE", "").strip().lower() in ("1", "true", "yes", "on")
 # Gateway pipeline options (live-switchable from the control centre). Empty =
 # leave it to the gateway's own default, which also keeps older gateways happy.
@@ -926,6 +951,8 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
         data["instruction"] = instruction
     if phase in _PHASE_NOTES:
         data["user_note"] = _PHASE_NOTES[phase]   # ignored by gateways without it
+    if LOG_PROMPTS:
+        data["debug_prompt"] = "true"
     sid = session_id or SESSION_ID
     if sid:
         data["session_id"] = sid     # gateway threads conversation history per session
@@ -962,6 +989,7 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
 
     reply_parts, heard = [], ""
     done_metrics = {}
+    prompt = None
     spoke = {"led": False}
     payload = {}
     try:
@@ -1015,6 +1043,7 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
                     elif event == "done":
                         m = payload.get("metrics") or {}
                         done_metrics = m
+                        prompt = payload.get("prompt")
                         # publish the per-component latencies NOW (gateway is
                         # done generating) so the boxes fill in while the robot
                         # is still speaking, not after playback drains.
@@ -1029,8 +1058,9 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
         time.sleep(SPEAK_DRAIN_PAD)    # let the speaker tail decay before we listen
 
     reply = "".join(reply_parts)
+    _log_prompt(prompt, reply)
     _pub("turn", ev="done", metrics=done_metrics, heard=heard, reply=reply,
-         total_ms=(time.perf_counter() - t0) * 1000)
+         total_ms=(time.perf_counter() - t0) * 1000, prompt=prompt)
     return heard, reply
 
 
@@ -1345,7 +1375,8 @@ class PresenceController(threading.Thread):
         def opts():
             o = dict(STREAM)
             o.update(instruction=_prompt("converse"), transcribe=CONV_TRANSCRIBE,
-                     asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE)
+                     asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE,
+                     debug_prompt=LOG_PROMPTS)
             if o.get("mic_gain") in (None, "", "auto"):
                 o["mic_gain"] = STREAM_ARRAY_GAIN if vad._open_src == "array" else 1.0
             return o
@@ -1394,7 +1425,7 @@ class PresenceController(threading.Thread):
             lambda wav: self.wav_to_pcm16k(_wav_path(wav), self.gain),
             pub=_pub, grab_image=_grab_jpeg,
             set_led=lambda r, g, b: self.set_led(self.audio, r, g, b),
-            drain_pad=SPEAK_DRAIN_PAD, echo_delay_ms=_ECHO_DELAY_MS)
+            drain_pad=SPEAK_DRAIN_PAD, echo_delay_ms=_ECHO_DELAY_MS, on_prompt=_log_prompt)
         STREAM_SESSION = session
         print(f"[presence] streamed conversation over {url}")
         threading.Thread(target=watch, daemon=True).start()
