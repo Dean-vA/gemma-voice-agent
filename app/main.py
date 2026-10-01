@@ -188,20 +188,25 @@ async def _stream_reply(session_id: str, samples, instruction: str, timer: TurnT
         yield chunk
 
 
-def commit_turn(session_id: str, state: TurnState, samples, image_bytes: bytes | None = None) -> None:
-    """Append the finished (or interrupted) turn to the session history."""
+def commit_turn(session_id: str, state: TurnState, samples, image_bytes: bytes | None = None) -> Turn:
+    """Append the finished (or interrupted) turn to the session history.
+
+    Returns the stored assistant turn, so the streamed loop can rewrite it to
+    what was actually spoken if the visitor cuts the reply off."""
     settings = app.state.settings
     history = SESSIONS.setdefault(session_id, [])
+    reply = Turn(role="assistant", text=state.reply)
     history.append(Turn(role="user", text=state.user_text, audio=samples, image=image_bytes))
-    history.append(Turn(role="assistant", text=state.reply))
+    history.append(reply)
     _trim_history(history, settings.max_history_turns)
     _slim_history(history, settings.history_keep_audio_turns)
+    return reply
 
 
 async def turn_events(session_id: str, samples, instruction: str, timer: TurnTimer, *,
                       transcribe: bool = False, asr_engine: str = "", speak: bool = False, engine: str = "",
                       image_bytes: bytes | None = None, state: TurnState | None = None,
-                      commit: bool = True, llm_input: str = ""):
+                      commit: bool = True, llm_input: str = "", user_note: str = ""):
     """Run one turn and yield ``(event, data)`` pairs.
 
     Events: ``transcript`` (user's words, if requested), ``token`` (text),
@@ -209,7 +214,8 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     Speaks sentence-by-sentence so the first audio lands before the full reply.
     Shared by the SSE endpoints and the streamed /ws/converse loop; the latter
     passes ``state`` and ``commit=False`` because it decides itself when (and
-    whether) the turn enters the history.
+    whether) the turn enters the history. ``user_note`` is stored as the user's
+    line when there is no transcript (e.g. a greeting made from silence).
     """
     state = state if state is not None else TurnState()
     llm_text, transcribed = await _hear(samples, instruction, timer, state, transcribe=transcribe,
@@ -254,6 +260,8 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     # name from the X-Engine header, so no extra health round-trip is needed.
     metrics = timer.finish(output_tokens=_approx_tokens(reply))
     if commit:
+        if user_note and not state.user_text:
+            state.user_text = user_note
         commit_turn(session_id, state, samples, image_bytes)
     yield "done", {"reply": reply, "metrics": metrics.as_dict()}
 
@@ -318,12 +326,13 @@ async def chat_stream(audio: UploadFile, session_id: str = Form(None), instructi
 @app.post("/converse")
 async def converse(audio: UploadFile, session_id: str = Form(None), instruction: str = Form(""),
                    transcribe: bool = Form(False), asr_engine: str = Form(""), llm_input: str = Form(""),
-                   engine: str = Form(""), image: UploadFile = File(None)):
+                   engine: str = Form(""), image: UploadFile = File(None), user_note: str = Form("")):
     """Voice loop: audio in -> Gemma streams text -> sentence-chunked TTS -> audio out.
 
     Streams SSE: `transcript` (user's words, if requested), `token` (text),
     `audio` (base64 wav per sentence), `done` (metrics). `engine` selects
-    which TTS service to use.
+    which TTS service to use. `user_note` is what the history records as the
+    user's turn when nothing was transcribed (e.g. "(the visitor walked up)").
     """
     sid = session_id or uuid.uuid4().hex
     audio_bytes = await audio.read()
@@ -333,7 +342,8 @@ async def converse(audio: UploadFile, session_id: str = Form(None), instruction:
     image_bytes = await _read_image(image)
     decoded, timer = _decode(audio_bytes)
     return _sse_turn(sid, decoded, timer, instruction, transcribe=transcribe, asr_engine=asr_engine,
-                     llm_input=llm_input, speak=True, engine=engine, image_bytes=image_bytes)
+                     llm_input=llm_input, speak=True, engine=engine, image_bytes=image_bytes,
+                     user_note=user_note)
 
 
 @app.websocket("/ws/converse")

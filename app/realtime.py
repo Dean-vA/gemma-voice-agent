@@ -12,6 +12,10 @@ Client -> server
                        respond?}    respond=false: detect turns only, generate no reply
     {"type": "image", "data": <base64 jpeg/png> | null}   still for the next turn
     {"type": "playback", "active": bool}                  client is playing TTS
+    {"type": "played", "state": "cut", "index": int, "fraction": float}
+                                    the client cut reply sentence `index` off after
+                                    `fraction` of it (barge-in); the history then keeps
+                                    only what was actually spoken
 
 Server -> client  ({"type": <event>, ...})
     session         {session_id}
@@ -70,6 +74,8 @@ class _Turn:
     task: asyncio.Task | None = None
     committed: bool = False   # output released; the turn can no longer reopen
     finished: bool = False    # reply complete (or failed)
+    sentences: dict = field(default_factory=dict)   # index -> sentence text sent as audio
+    stored_reply: object | None = None              # the assistant Turn in the history
 
 
 class RealtimeSession:
@@ -93,6 +99,7 @@ class RealtimeSession:
         self._image: bytes | None = None
         self._playing = False             # client reports TTS playback in progress
         self._turn: _Turn | None = None
+        self._last_reply: _Turn | None = None   # newest turn whose reply is in the history
         self._remainder = np.zeros(0, dtype=np.float32)
         self._gated = False
 
@@ -154,6 +161,30 @@ class RealtimeSession:
             self._image = base64.b64decode(data) if data else None
         elif kind == "playback":
             self._playing = bool(msg.get("active"))
+        elif kind == "played":
+            self._on_played(msg)
+
+    def _on_played(self, msg: dict) -> None:
+        """The client cut a reply off mid-playback: make the history say only
+        what was actually spoken. Gemma writes a reply far faster than it is
+        spoken, so without this it would believe the visitor heard all of it."""
+        turn = self._last_reply
+        if msg.get("state") != "cut" or turn is None or turn.stored_reply is None:
+            return
+        try:
+            index = int(msg.get("index"))
+            fraction = min(1.0, max(0.0, float(msg.get("fraction", 0.0))))
+        except (TypeError, ValueError):
+            return
+        if index not in turn.sentences:
+            return  # a clip from an older reply
+        spoken = [turn.sentences[i] for i in sorted(turn.sentences) if i < index]
+        words = turn.sentences[index].split()
+        partial = " ".join(words[: int(len(words) * fraction)])
+        said = " ".join(t for t in [*spoken, partial] if t).strip()
+        turn.stored_reply.text = (said + " — " if said else "") + "[interrupted by the visitor]"
+        log.info("barge-in: history keeps what was spoken (%d of %d sentences, %.0f%% of the last)",
+                 len(spoken), len(turn.sentences), fraction * 100)
 
     async def _on_audio(self, data: bytes) -> None:
         pcm = np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
@@ -211,7 +242,8 @@ class RealtimeSession:
             # the newer turn always wins.)
             await self._cancel(turn)
             if turn.committed and turn.state.reply:
-                self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
+                turn.stored_reply = self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
+                self._last_reply = turn
             if turn.committed:
                 await self._send("cancelled", {"reason": "barge_in"})
         self._turn = _Turn(start_sample=ev.start_sample)
@@ -296,15 +328,18 @@ class RealtimeSession:
             first_audio_ms: float | None = None
             while (item := await queue.get()) is not None:
                 event, data = item
-                if event == "audio" and first_audio_ms is None:
-                    first_audio_ms = (time.perf_counter() - timer._t_start) * 1000.0
+                if event == "audio":
+                    turn.sentences[data.get("index", len(turn.sentences))] = data.get("sentence", "")
+                    if first_audio_ms is None:
+                        first_audio_ms = (time.perf_counter() - timer._t_start) * 1000.0
                 elif event == "done":
                     # The reply was prepared during the grace; report when it
                     # actually reached the client.
                     data["metrics"]["components"].append({"name": "reopen_grace", "ms": round(held_ms, 2)})
                     if first_audio_ms is not None:
                         data["metrics"]["time_to_first_audio_ms"] = first_audio_ms
-                    self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
+                    turn.stored_reply = self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
+                    self._last_reply = turn
                     turn.finished = True
                 await self._send(event, data)
             turn.finished = True
