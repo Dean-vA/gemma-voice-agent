@@ -644,6 +644,15 @@ class VadCapture:
                 print("[presence] calib: no array audio -> keeping previous thresholds")
                 self._note_stall()
                 return None
+            # Right after mic mode is switched on the array streams exact digital
+            # silence for a moment; calibrating on it gave noise_floor=0.0000 and
+            # pinned the thresholds to the minimum. A live mic is never exactly 0.
+            live = [r for r in rmss if r > 0.0]
+            if len(live) < len(rmss) // 2:
+                print("[presence] calib: array still warming up (silent frames) -> retrying")
+                self.need_recalib = True
+                return None
+            rmss = live
             if reset:
                 self.floor_hist = []
             self._apply_floor(float(np.percentile(rmss, CALIB_PCTL)))

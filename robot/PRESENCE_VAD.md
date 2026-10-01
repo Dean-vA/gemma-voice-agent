@@ -211,6 +211,7 @@ It's also a remote PTT for the robot (secure-context caveat — see `CONTROL_CEN
 - Open/close the mic stream per utterance (idle PortAudio stream wedges).
 - Never block forever on a mic read — time out and reopen.
 - The array only streams in voice-service mic mode (API 1008); re-enable on every arm.
+- Right after mic mode is switched on, the array streams exact zeros for a moment: calibration skips silent frames and retries (otherwise floor = 0.0000).
 - In a crowd, learn the floor from recordings too — non-voiced-frame updates starve.
 
 ---
