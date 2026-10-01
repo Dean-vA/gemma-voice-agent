@@ -690,6 +690,22 @@ def _build_app(hub, store, controller, busy):
                         "reply": live.get("reply", ""), "prompt": None, "in_progress": True})
         return jsonify({"session": session, "turns": out})
 
+    @app.route("/api/speech_gain", methods=["GET", "POST"])
+    def api_speech_gain():
+        """Software gain on George's replies (applies from the next sentence)."""
+        if not hasattr(controller, "gain"):
+            return jsonify({"ok": False, "error": "no presence controller"})
+        if request.method == "POST":
+            try:
+                g = float((request.get_json(force=True) or {}).get("gain"))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "gain must be a number"}), 400
+            if not 0.25 <= g <= 4.0:
+                return jsonify({"ok": False, "error": "gain must be 0.25-4"}), 400
+            controller.gain = g
+            print(f"[web] speech gain -> x{g:g}")
+        return jsonify({"ok": True, "gain": controller.gain})
+
     @app.route("/api/volume", methods=["GET", "POST"])
     def api_volume():
         audio = getattr(controller, "audio", None)
@@ -963,6 +979,11 @@ label.chk input{padding:0;accent-color:var(--acc)}
         <label for=vol title="George's head-speaker volume (the robot's own setting, kept across restarts).">speaker volume</label>
         <input type=range id=vol min=0 max=100 step=5 style=flex:1>
         <span class=tag id=volst>—</span>
+      </div>
+      <div class=prow style=margin-top:6px>
+        <label for=sgain title="Software gain on George's replies, on top of the speaker volume. Lower = less of his own voice in the mic (barge-in tells him and the visitor apart better), but quieter in a noisy hall.">speech gain</label>
+        <input type=range id=sgain min=0.5 max=3 step=0.25 style=flex:1>
+        <span class=tag id=sgainst>—</span>
       </div>
       <div class=hint style=margin-top:10px>browser mic · Hold-to-Talk (needs https / localhost)</div>
       <canvas id=wave width=620 height=46 class=wave></canvas>
@@ -1475,6 +1496,13 @@ let volT;
 function showVol(d){ if(d&&d.ok&&d.volume!=null){ if(document.activeElement!==$('vol'))$('vol').value=d.volume; $('volst').textContent=d.volume+'%'; }
   else $('volst').textContent=(d&&d.error)||'unavailable'; }
 fetch('/api/volume').then(r=>r.json()).then(showVol).catch(()=>showVol(null));
+let sgT;
+function showSg(d){ if(d&&d.ok){ if(document.activeElement!==$('sgain'))$('sgain').value=d.gain; $('sgainst').textContent='x'+(+d.gain).toFixed(2); }
+  else $('sgainst').textContent=(d&&d.error)||'unavailable'; }
+fetch('/api/speech_gain').then(r=>r.json()).then(showSg).catch(()=>showSg(null));
+$('sgain').oninput=()=>{$('sgainst').textContent='x'+(+$('sgain').value).toFixed(2);clearTimeout(sgT);
+  sgT=setTimeout(()=>fetch('/api/speech_gain',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({gain:parseFloat($('sgain').value)})}).then(r=>r.json()).then(showSg),250);};
 $('vol').oninput=()=>{$('volst').textContent=$('vol').value+'%';clearTimeout(volT);
   volT=setTimeout(()=>fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({volume:parseInt($('vol').value,10)})}).then(r=>r.json()).then(showVol),250);};

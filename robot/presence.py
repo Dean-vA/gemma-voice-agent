@@ -107,6 +107,12 @@ DISARM_SECS = float(os.environ.get("PRESENCE_DISARM_SECS", "2.0"))  # absent -> 
 # on a looser leash (smaller face + longer grace) than the arrival gate uses.
 STAY_FRAC        = float(os.environ.get("PRESENCE_STAY_FRAC", "0.12"))
 CONV_DISARM_SECS = float(os.environ.get("PRESENCE_CONV_DISARM_SECS", "3.0"))
+# Software gain on George's replies before PlayStream (live-adjustable from the
+# control centre). Was a fixed x3 (a Piper-era leftover). His echo at the mic
+# array scales with it: measured with his real voice, x3 -> echo peaks ~0.21,
+# x1 -> ~0.035-0.1, below the visitor's voice up close (~0.13 typical, 0.3 peaks),
+# which is what lets barge-in tell the two apart.
+TTS_GAIN = float(os.environ.get("PRESENCE_TTS_GAIN", "1.5"))
 # No goodbye to someone who's already gone: skip it if the visitor's face was
 # last seen longer ago than this (it went to people 15 m away).
 GOODBYE_MAX_SECS = float(os.environ.get("PRESENCE_GOODBYE_MAX_SECS", "4.0"))
@@ -1153,7 +1159,7 @@ class PresenceController(threading.Thread):
         self.busy = busy_event
         self.set_led = set_led
         self.wav_to_pcm16k = wav_to_pcm16k
-        self.gain = gain
+        self.gain = TTS_GAIN        # presence replies; the F1 push-to-talk path keeps `gain`
         self.seq_ref = seq_ref
         self.arm = arm              # G1ArmActionClient for the wave (or None)
         self.mode_fn = mode_fn      # () -> mode_machine, for the gesture gate
