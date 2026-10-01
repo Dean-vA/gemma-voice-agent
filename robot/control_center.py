@@ -672,6 +672,30 @@ def _build_app(hub, store, controller, busy):
                   f"aec={o['aec']} vad_overrides={o['vad']}")
         return jsonify(_stream_snapshot())
 
+    @app.route("/api/volume", methods=["GET", "POST"])
+    def api_volume():
+        audio = getattr(controller, "audio", None)
+        if audio is None or not hasattr(audio, "SetVolume"):
+            return jsonify({"ok": False, "error": "no robot speaker on this host"})
+        try:
+            if request.method == "POST":
+                v = int((request.get_json(force=True) or {}).get("volume", -1))
+                if not 0 <= v <= 100:
+                    return jsonify({"ok": False, "error": "volume must be 0-100"}), 400
+                code = audio.SetVolume(v)
+                code = code[0] if isinstance(code, tuple) else code
+                if code not in (0, None):
+                    return jsonify({"ok": False, "error": f"SetVolume failed ({code})"}), 502
+                print(f"[web] speaker volume -> {v}")
+            if not hasattr(audio, "GetVolume"):           # laptop stub
+                return jsonify({"ok": True, "volume": v if request.method == "POST" else None})
+            code, data = audio.GetVolume()
+            if code != 0:
+                return jsonify({"ok": False, "error": f"GetVolume failed ({code})"}), 502
+            return jsonify({"ok": True, "volume": int((data or {}).get("volume", 0))})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
     @app.route("/api/mic", methods=["POST"])
     def api_mic():
         v = getattr(controller, "vad", None)
@@ -904,6 +928,11 @@ label.chk input{padding:0;accent-color:var(--acc)}
         <button id=disarm>Disarm</button>
         <button id=talk>● Hold to Talk</button>
       </div>
+      <div class=prow style=margin-top:10px>
+        <label for=vol title="George's head-speaker volume (the robot's own setting, kept across restarts).">speaker volume</label>
+        <input type=range id=vol min=0 max=100 step=5 style=flex:1>
+        <span class=tag id=volst>—</span>
+      </div>
       <div class=hint style=margin-top:10px>browser mic · Hold-to-Talk (needs https / localhost)</div>
       <canvas id=wave width=620 height=46 class=wave></canvas>
       <div class=hint id=micst style=margin-top:6px></div>
@@ -931,7 +960,7 @@ label.chk input{padding:0;accent-color:var(--acc)}
       <div class=prow style=margin-top:10px>
         <label for=micsrc>mic source</label>
         <select id=micsrc><option value=array>G1 mic array</option><option value=usb>USB mic</option></select>
-        <span class=tag id=micst></span>
+        <span class=tag id=micsrcst></span>
       </div>
       <div class=prow style=margin-top:10px>
         <button id=calib>Run VAD calibration</button>
@@ -1294,10 +1323,10 @@ const TKEYS=['prox','arm','disarm','silence_ms','noise_mult'];
 let tuneT;
 function loadTune(){fetch('/api/tune').then(r=>r.json()).then(d=>{TKEYS.forEach(k=>{
   const el=$('t_'+k); if(el&&d[k]!=null){el.value=d[k];$('v_'+k).textContent=(''+d[k]);}});
-  if(d.mic_source){$('micsrc').value=d.mic_source;$('micst').textContent='using '+d.mic_source;}});}
-$('micsrc').onchange=()=>{const src=$('micsrc').value;$('micst').textContent='switching…';
+  if(d.mic_source){$('micsrc').value=d.mic_source;$('micsrcst').textContent='using '+d.mic_source;}});}
+$('micsrc').onchange=()=>{const src=$('micsrc').value;$('micsrcst').textContent='switching…';
   fetch('/api/mic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:src})})
-    .then(r=>r.json()).then(d=>{$('micst').textContent=d.ok?('using '+d.mic_source+' · recalibrates when idle'):(d.error||'failed');loadTune();});};
+    .then(r=>r.json()).then(d=>{$('micsrcst').textContent=d.ok?('using '+d.mic_source+' · recalibrates when idle'):(d.error||'failed');loadTune();});};
 TKEYS.forEach(k=>{const el=$('t_'+k); if(el)el.oninput=()=>{$('v_'+k).textContent=el.value;
   clearTimeout(tuneT);tuneT=setTimeout(()=>fetch('/api/tune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:parseFloat(el.value)})}),200);};});
 // conversation link: HTTP vs streamed WebSocket, barge-in, echo cancellation, and
@@ -1375,6 +1404,14 @@ $('calib').onclick=()=>{$('calibst').textContent='calibrating…';
   fetch('/api/calibrate',{method:'POST'}).then(r=>r.json()).then(d=>{
     $('calibst').textContent=d.ok?('floor '+(+d.noise_floor).toFixed(4)+' → thr '+(+d.speech_thresh).toFixed(4)):(d.error||'failed');});};
 loadTune();
+// speaker volume (robot AudioClient Get/SetVolume)
+let volT;
+function showVol(d){ if(d&&d.ok&&d.volume!=null){ if(document.activeElement!==$('vol'))$('vol').value=d.volume; $('volst').textContent=d.volume+'%'; }
+  else $('volst').textContent=(d&&d.error)||'unavailable'; }
+fetch('/api/volume').then(r=>r.json()).then(showVol).catch(()=>showVol(null));
+$('vol').oninput=()=>{$('volst').textContent=$('vol').value+'%';clearTimeout(volT);
+  volT=setTimeout(()=>fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({volume:parseInt($('vol').value,10)})}).then(r=>r.json()).then(showVol),250);};
 
 // browser mic: ONE persistent stream + analyser. Holding Talk just flips a flag
 // (instant) and uploads on release; the analyser drives a live waveform.
