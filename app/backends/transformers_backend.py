@@ -78,6 +78,7 @@ class TransformersBackend(ChatBackend):
         self, system_prompt: str, history: list[Turn], audio_paths: dict[int, str],
         user_audio_path: str, instruction: str,
         image_paths: dict[int, str] | None = None, user_image_path: str | None = None,
+        user_text: str | None = None,
     ) -> list[dict]:
         image_paths = image_paths or {}
         messages: list[dict] = [
@@ -96,10 +97,16 @@ class TransformersBackend(ChatBackend):
             else:
                 messages.append({"role": "assistant", "content": [{"type": "text", "text": turn.text}]})
 
-        cur: list[dict] = [{"type": "text", "text": instruction or "Respond to the audio."}]
-        if user_image_path is not None:
-            cur.append({"type": "image", "image": user_image_path})  # image after text, before audio
-        cur.append({"type": "audio", "audio": user_audio_path})  # audio last
+        if user_text:
+            # Cascade: the transcript stands in for the audio.
+            cur: list[dict] = [{"type": "text", "text": f"{instruction}\n{user_text}" if instruction else user_text}]
+            if user_image_path is not None:
+                cur.append({"type": "image", "image": user_image_path})
+        else:
+            cur = [{"type": "text", "text": instruction or "Respond to the audio."}]
+            if user_image_path is not None:
+                cur.append({"type": "image", "image": user_image_path})  # image after text, before audio
+            cur.append({"type": "audio", "audio": user_audio_path})  # audio last
         messages.append({"role": "user", "content": cur})
         return messages
 
@@ -111,12 +118,14 @@ class TransformersBackend(ChatBackend):
         instruction: str,
         max_new_tokens: int,
         user_image: bytes | None = None,
+        user_text: str | None = None,
     ) -> AsyncIterator[str]:
         import torch
-        from transformers import TextIteratorStreamer
+        from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
 
         sr = self.settings.sample_rate
         tmp_paths: list[str] = []
+        stop = None
 
         def _write(samples: np.ndarray) -> str:
             fd, path = tempfile.mkstemp(suffix=".wav")
@@ -141,7 +150,8 @@ class TransformersBackend(ChatBackend):
             user_path = _write(user_audio)
             user_image_path = _write_image(user_image) if user_image is not None else None
             messages = self._build_messages(
-                system_prompt, history, audio_paths, user_path, instruction, image_paths, user_image_path
+                system_prompt, history, audio_paths, user_path, instruction, image_paths, user_image_path,
+                user_text,
             )
 
             inputs = self.processor.apply_chat_template(
@@ -150,7 +160,15 @@ class TransformersBackend(ChatBackend):
 
             tok = getattr(self.processor, "tokenizer", self.processor)
             streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
-            gen_kwargs = dict(**inputs, max_new_tokens=max_new_tokens, do_sample=True, temperature=0.7, streamer=streamer)
+            # Lets a cancelled turn (barge-in) stop the generate thread early.
+            stop = threading.Event()
+
+            class _Stop(StoppingCriteria):
+                def __call__(self, input_ids, scores, **kwargs):
+                    return torch.full((input_ids.shape[0],), stop.is_set(), dtype=torch.bool, device=input_ids.device)
+
+            gen_kwargs = dict(**inputs, max_new_tokens=max_new_tokens, do_sample=True, temperature=0.7,
+                              streamer=streamer, stopping_criteria=StoppingCriteriaList([_Stop()]))
 
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -175,6 +193,8 @@ class TransformersBackend(ChatBackend):
                     break
                 yield item
         finally:
+            if stop is not None:
+                stop.set()
             for p in tmp_paths:
                 try:
                     os.remove(p)

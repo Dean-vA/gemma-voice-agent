@@ -58,7 +58,7 @@ class VLLMBackend(ChatBackend):
 
     def _build_messages(
         self, system_prompt: str, history: list[Turn], user_audio: np.ndarray,
-        instruction: str, user_image: bytes | None = None,
+        instruction: str, user_image: bytes | None = None, user_text: str | None = None,
     ) -> list[dict]:
         sr = self.settings.sample_rate
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -78,7 +78,10 @@ class VLLMBackend(ChatBackend):
             cur.append({"type": "text", "text": instruction})
         if user_image is not None:
             cur.append(_image_part(user_image))  # image after text, before audio
-        cur.append(_audio_part(user_audio, sr))  # audio last (Gemma 4 rule)
+        if user_text:
+            cur.append({"type": "text", "text": user_text})  # cascade: the transcript stands in for the audio
+        else:
+            cur.append(_audio_part(user_audio, sr))  # audio last (Gemma 4 rule)
         messages.append({"role": "user", "content": cur})
         return messages
 
@@ -90,9 +93,10 @@ class VLLMBackend(ChatBackend):
         instruction: str,
         max_new_tokens: int,
         user_image: bytes | None = None,
+        user_text: str | None = None,
     ) -> AsyncIterator[str]:
         await self._ensure_model()
-        messages = self._build_messages(system_prompt, history, user_audio, instruction, user_image)
+        messages = self._build_messages(system_prompt, history, user_audio, instruction, user_image, user_text)
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -100,12 +104,17 @@ class VLLMBackend(ChatBackend):
             temperature=0.7,
             stream=True,
         )
-        async for chunk in resp:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        try:
+            async for chunk in resp:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+        finally:
+            # On barge-in the turn is cancelled mid-stream; closing the HTTP
+            # stream is what makes vLLM abort the generation.
+            await resp.close()
 
     async def health(self) -> dict:
         info = {"backend": self.name, "model": self.model, "vllm_base_url": self.settings.vllm_base_url}

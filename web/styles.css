@@ -100,6 +100,50 @@ main {
 .session { display: flex; align-items: center; gap: 10px; }
 .session code { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 
+/* Conversation / ASR eval switch: a segmented control, both options clearly buttons. */
+.modes { display: inline-flex; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); }
+.mode {
+  font: 600 12px var(--sans); text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--muted); background: transparent; border: 0;
+  border-radius: 999px; padding: 7px 16px; cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.mode:hover { color: var(--text); background: var(--surface-2); }
+.mode.active { color: oklch(0.2 0.02 42); background: var(--signal); }
+
+/* ---------- ASR eval mode ---------- */
+.transcript[hidden], .eval-view[hidden] { display: none; }
+.eval-table td.num.faster { color: var(--good); }
+.eval-table td.num.slower { color: var(--warn); }
+.eval-card .parts { color: var(--muted); font: 11px var(--mono); margin-top: 6px; line-height: 1.6; }
+/* The sentence to read stays put; only the clip table scrolls. */
+.eval-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.eval-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; }
+.eval-scroll::-webkit-scrollbar { width: 8px; }
+.eval-scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+.eval-table thead th { position: sticky; top: 0; background: var(--surface); }
+.eval-meta, .eval-engine { color: var(--faint); font: 11px var(--mono); letter-spacing: 0.04em; }
+.eval-prompt { font-size: clamp(20px, 2.4vw, 30px); line-height: 1.35; font-weight: 500; margin: 6px 0 14px; text-wrap: balance; }
+.eval-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
+.eval-hint { color: var(--faint); font-size: 12px; margin-left: 6px; }
+.eval-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.eval-card { background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: var(--r-sm); padding: 10px 12px; }
+.eval-card .v { font: 600 19px var(--mono); color: var(--data); margin-top: 3px; }
+.eval-card .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+.eval-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.eval-table th {
+  text-align: left; color: var(--faint); font: 11px var(--mono); text-transform: uppercase;
+  letter-spacing: 0.06em; padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+.eval-table td { padding: 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; line-height: 1.45; }
+.eval-table tr { cursor: pointer; }
+.eval-table tr.current td { background: oklch(0.245 0.023 274 / 0.6); }
+.eval-table tr.todo td { color: var(--faint); }
+.eval-table td.id { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.eval-table td.num { font: 12px var(--mono); text-align: right; white-space: nowrap; color: var(--data); }
+.eval-table .ref { color: var(--muted); }
+.eval-table .hyp b { color: var(--bad); font-weight: 600; }  /* words not in the reference */
+
 /* ---------- transcript ---------- */
 .transcript { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 6px; }
 .transcript::-webkit-scrollbar { width: 8px; }
@@ -134,6 +178,8 @@ main {
   content: "▍"; color: var(--data); margin-left: 1px; animation: blink 1s steps(2) infinite;
 }
 .msg.assistant.done .body::after { content: none; }
+.msg.assistant.interrupted .body { opacity: 0.6; }
+.msg.assistant.interrupted .body::after { content: " ⸺"; animation: none; }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* ---------- capture stage ---------- */
@@ -287,6 +333,9 @@ button.ghost:hover { color: var(--text); border-color: var(--signal-dim); }
   display: flex; align-items: center; gap: 14px; padding: 12px 14px;
   border-bottom: 1px solid var(--line-soft); background: oklch(0.16 0.02 274);
 }
+.cam-tray[hidden] { display: none; }
+a.badge { text-decoration: none; color: var(--muted); }
+a.badge:hover { color: var(--text); }
 .cam-video {
   width: 260px; max-width: 42vw; aspect-ratio: 4 / 3; object-fit: cover;
   border-radius: var(--r-sm); border: 1px solid var(--line); background: #000;

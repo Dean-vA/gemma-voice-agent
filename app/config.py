@@ -38,6 +38,42 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     max_audio_seconds: float = 30.0
 
+    # Streamed voice loop (/ws/converse): server-side Silero VAD + Smart Turn.
+    # Defaults follow huggingface/speech-to-speech, the Reachy Mini backend.
+    vad_threshold: float = 0.6               # speech trigger; stays active to threshold-0.15
+    vad_min_silence_ms: int = 64             # silence that closes a speech segment
+    vad_min_speech_ms: int = 384             # active speech before "speech started" (and barge-in)
+    vad_min_speech_continuation_ms: int = 192  # same, for speech resuming inside a reopen window
+    vad_speech_pad_ms: int = 500             # pre-roll kept before the trigger
+    # After a segment closes the reply is prepared speculatively but held back
+    # for a grace period; speech resuming before it is released reopens the
+    # same turn. Smart Turn picks the grace: reopen_ms when the turn sounds
+    # complete (or Smart Turn is off), smart_turn_max_wait_ms when it doesn't.
+    smart_turn: bool = True
+    smart_turn_threshold: float = 0.5
+    smart_turn_max_wait_ms: int = 2000         # grace for an incomplete-sounding turn
+    smart_turn_incomplete_delay_ms: int = 600  # ...and delay before working on its reply
+    reopen_ms: int = 800                     # grace for a complete-sounding turn
+    unanswered_reopen_ms: int = 7000         # a turn with no reply released yet can reopen this long
+    # Let the user talk over the robot. Relies on echo cancellation at the
+    # client; set false to ignore the mic while the robot is replying/speaking.
+    vad_barge_in: bool = True
+
+    # Transcription. "gemma" asks the LLM itself for a transcript (an extra LLM
+    # call); "parakeet" uses Parakeet TDT via nano-parakeet, loaded in the
+    # gateway. Clients can pick per request; this is the default.
+    asr_engine: str = "gemma"
+    # What the LLM answers from: "audio" (Gemma hears the speech itself) or
+    # "transcript" (cascade: the ASR transcript is sent as text, no audio;
+    # Parakeet unless another asr_engine is requested).
+    llm_input: str = "audio"
+    parakeet: bool = True                    # load Parakeet at startup (uses some VRAM on cuda)
+    parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v3"
+    parakeet_device: str = "auto"            # auto | cuda | cpu
+
+    # Read-aloud clips recorded on the ASR eval page (/web/asr-eval.html).
+    asr_eval_dir: str = "samples/asr"
+
     # Conversation
     max_history_turns: int = 8
     # Replayed user audio dominates context in long chats. If >= 0, keep raw

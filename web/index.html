@@ -24,7 +24,11 @@
     <!-- conversation -->
     <section class="panel conversation">
       <div class="panel-head">
-        <h2>Conversation</h2>
+        <div class="modes" role="tablist">
+          <button class="mode active" id="mode-chat" role="tab">Conversation</button>
+          <button class="mode" id="mode-eval" role="tab" title="Read test sentences aloud to compare transcription engines">ASR eval</button>
+          <button class="mode" id="mode-latency" role="tab" title="Replay the recorded clips through the full pipeline and time the first spoken audio">Speech latency</button>
+        </div>
         <div class="session">
           <code id="session-id">no session</code>
           <button id="btn-reset" class="ghost">Reset</button>
@@ -36,6 +40,44 @@
           <span class="mark">◍</span>
           Hold the button (or <kbd>space</kbd>) and speak.
           The robot brain replies in text, latency on the right.
+        </div>
+      </div>
+
+      <!-- ASR eval mode: read each test case aloud; every engine transcribes it -->
+      <div id="eval-view" class="eval-view" hidden>
+        <div class="eval-meta" id="eval-meta">—</div>
+        <p class="eval-prompt" id="eval-prompt"></p>
+        <div class="eval-nav">
+          <button id="eval-prev" class="ghost">← Previous</button>
+          <button id="eval-next" class="ghost">Next →</button>
+          <button id="eval-play" class="ghost" disabled>▶ Play back</button>
+          <span class="eval-hint">Hold the button (or <kbd>space</kbd>) and read the sentence — or switch on Continuous and just read; it moves on by itself. ← → to move.</span>
+        </div>
+        <div class="eval-summary" id="eval-summary"></div>
+        <div class="eval-scroll">
+          <table class="eval-table">
+            <thead><tr><th>Clip</th><th>Reference / transcripts</th><th>WER</th><th>Latency</th></tr></thead>
+            <tbody id="eval-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Speech latency: replay the recorded clips through /converse in both
+           configurations and time how long until the first spoken audio. -->
+      <div id="lat-view" class="eval-view" hidden>
+        <div class="eval-nav">
+          <button id="lat-run" class="ghost">▶ Run</button>
+          <select id="lat-runs" class="tts-select" title="Timed runs per clip per configuration">
+            <option value="1" selected>1 run</option><option value="3">3 runs</option>
+          </select>
+          <span class="eval-hint" id="lat-status">Replays the clips recorded in ASR eval through the full pipeline, with the selected voice. Repeat runs of a clip hit vLLM's prompt cache and look faster than a fresh utterance.</span>
+        </div>
+        <div class="eval-summary" id="lat-summary"></div>
+        <div class="eval-scroll">
+          <table class="eval-table">
+            <thead><tr><th>Clip</th><th>Sentence</th><th>Hears audio</th><th>Reads transcript</th><th>Difference</th></tr></thead>
+            <tbody id="lat-rows"></tbody>
+          </table>
         </div>
       </div>
 
@@ -65,6 +107,13 @@
             <span class="switch"></span>
             <span>📝 Transcribe</span>
           </label>
+          <select id="asr-select" class="tts-select" title="Transcription engine">
+            <option value="gemma">📝 gemma</option>
+          </select>
+          <select id="input-select" class="tts-select" title="What Gemma answers from">
+            <option value="audio">🧠 hears audio</option>
+            <option value="transcript">🧠 reads transcript</option>
+          </select>
           <label class="toggle">
             <input type="checkbox" id="toggle-vision" />
             <span class="switch"></span>
@@ -129,6 +178,7 @@
   </main>
 
   <script src="/web/personas.js"></script>
+  <script src="/web/asr-script.js"></script>
   <script src="/web/app.js"></script>
 </body>
 </html>

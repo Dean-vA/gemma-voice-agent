@@ -35,6 +35,7 @@ class TurnMetrics:
     # Voice loop: wall time from request to first spoken audio chunk (TTS).
     time_to_first_audio_ms: float | None = None
     tts_engine: str | None = None
+    llm_input: str = "audio"                 # "audio" (native) | "transcript" (cascade)
     # Per-component / per-API-call latency breakdown for the turn.
     asr_ms: float | None = None              # optional speech-transcription pass
     tts_total_ms: float | None = None        # summed client round-trip of all TTS calls
@@ -92,6 +93,10 @@ class TurnTimer:
             yield
         finally:
             self._add_span(name, (_now() - t0) * 1000.0, extra)
+
+    def add_span(self, name: str, ms: float, **extra) -> None:
+        """Record a component whose duration was measured elsewhere."""
+        self._add_span(name, ms, extra)
 
     def _add_span(self, name: str, ms: float, extra: dict) -> None:
         self._spans.append((name, ms, extra))
