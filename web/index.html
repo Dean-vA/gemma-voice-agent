@@ -75,6 +75,10 @@
             <option value="parakeet">transcript: Parakeet</option>
             <option value="gemma">transcript: Gemma</option>
           </select>
+          <select id="lat-order" class="tts-select" title="Grouped: every clip through one configuration, then the next. Interleaved: each clip through all configurations before moving on.">
+            <option value="grouped" selected>order: grouped</option>
+            <option value="interleaved">order: interleaved</option>
+          </select>
           <span class="eval-hint" id="lat-status">Replays the clips recorded in ASR eval through the full pipeline, with the selected voice. Repeat runs of a clip hit vLLM's prompt cache and look faster than a fresh utterance.</span>
         </div>
         <div class="eval-summary" id="lat-summary"></div>
