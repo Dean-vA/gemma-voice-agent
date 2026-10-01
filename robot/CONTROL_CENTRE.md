@@ -71,6 +71,7 @@ Key facts (confirmed in `gemma-voice-agent/app/main.py` + `metrics.py`):
 - **Live streaming** — HEARD appears on transcript, REPLY streams token-by-token, and the per-stage boxes fill in the moment generation finishes (during playback, not after).
 - **Logs** — stdout tee → SSE console (docker logs still works).
 - **Prompt presets** — named presets (greet/converse/goodbye); `+ New`, Save, Activate (live, no restart), Delete. The "converse" field is George's system prompt/persona.
+- **Conversation link (experimental)** — switch between the HTTP loop (one utterance per request, robot VAD) and the **streamed WebSocket mode**, where the gateway does the turn-taking (Silero VAD + Smart Turn) and the visitor can **barge in**. Toggles for barge-in, echo cancellation and its noise suppression / auto gain; mic gain; and live sliders for this robot's overrides of the gateway's turn detection (speech threshold, speech needed to start a turn, closing silence, pre-roll, the reply-hold graces, Smart Turn on/off and threshold). See §11.
 - **Gateway pipeline** — two live dropdowns, applied from the next turn: who writes the HEARD transcript (off / Gemma / Parakeet), and what Gemma answers from (the audio, or a Parakeet transcript = cascade). Options the gateway hasn't loaded are greyed out; the ASR box in the diagram shows which engine ran.
 - **Tuning** — live sliders: proximity gate, arm/disarm seconds, end-of-speech ms, VAD onset ×; **mic source** dropdown (G1 mic array / USB mic — switches on the next listen and recalibrates); **Run VAD calibration** button (array: runs live, even mid-conversation; USB: queued until idle, because the USB mic can't be opened twice).
 
@@ -92,6 +93,7 @@ Laptop reality: native `sounddevice`/PortAudio won't load on this win-arm64 box,
 ```bash
 # from the laptop — push the working set (NOT dev_run.py / requirements-dev.txt):
 scp control_center.py presence.py g1_gemma_client.py usb_cam.py usb_mic.py \
+    streaming.py aec.py aec_server.py Dockerfile.aec \
     docker-compose.jetson.yml prompts.json unitree@192.168.123.164:~/g1demo/
 # on the robot:
 cd ~/g1demo
@@ -111,7 +113,7 @@ On the robot the real mic/VAD, kokoro→head speaker, V4L2 camera, and arm wave 
 ---
 
 ## 6. Endpoints
-`GET /` UI · `GET /video.mjpg` · `GET /last_image.jpg` · `GET /logs` (SSE) · `GET /state` (SSE) · `GET|POST /api/prompts` · `DELETE /api/prompts/<name>` · `POST /api/prompts/active` · `POST /api/control {arm|disarm|toggle}` · `POST /api/utterance` (raw WAV) · `GET|POST /api/gateway {transcribe, asr_engine, llm_input}` · `GET|POST /api/tune` (GET also returns `mic_source`) · `POST /api/calibrate` · `POST /api/mic {"source": "array"|"usb"}`. All behind HTTP Basic (empty password = open).
+`GET /` UI · `GET /video.mjpg` · `GET /last_image.jpg` · `GET /logs` (SSE) · `GET /state` (SSE) · `GET|POST /api/prompts` · `DELETE /api/prompts/<name>` · `POST /api/prompts/active` · `POST /api/control {arm|disarm|toggle}` · `POST /api/utterance` (raw WAV) · `GET|POST /api/stream {transport, barge_in, aec, aec_noise_suppression, aec_gain_control, aec_delay_ms, mic_gain, vad:{…}, reset_vad}` · `GET|POST /api/gateway {transcribe, asr_engine, llm_input}` · `GET|POST /api/tune` (GET also returns `mic_source`) · `POST /api/calibrate` · `POST /api/mic {"source": "array"|"usb"}`. All behind HTTP Basic (empty password = open).
 
 ---
 
@@ -119,6 +121,7 @@ On the robot the real mic/VAD, kokoro→head speaker, V4L2 camera, and arm wave 
 - **Web:** `PRESENCE_WEB`(1), `PRESENCE_WEB_PORT`(8080), `PRESENCE_WEB_PASSWORD`(""=open), `PRESENCE_WEB_FPS`(14), `PRESENCE_WEB_MAX_CLIENTS`(8), `PRESENCE_PROMPTS_PATH`.
 - **Presence:** `PRESENCE_PROX_FRAC`(0.18), `PRESENCE_ARM_SECS`(1.0), `PRESENCE_DISARM_SECS`(2.0), `PRESENCE_STAY_FRAC`(0.12 — looser face gate once a conversation is running), `PRESENCE_CONV_DISARM_SECS`(5.0 — absence before a mid-conversation goodbye), `PRESENCE_HAAR_NEIGHBORS`(4), `PRESENCE_HAAR_MIN_PX`(60).
 - **Mic source:** `PRESENCE_MIC`(compose `array`, code `usb`), `PRESENCE_ARRAY_MIN_FLOOR`(0.004), `PRESENCE_ARRAY_ONSET_BOOST`(1.5 — array onset = floor × NOISE_MULT × this), `PRESENCE_ARRAY_LOCAL_IP`(192.168.123.164), `PRESENCE_MIC_READ_TIMEOUT`(1.0 s — a read that waits longer = mic stall).
+- **Conversation link:** `PRESENCE_TRANSPORT`(`http` | `ws`), `PRESENCE_BARGE_IN`(1), `PRESENCE_AEC`(1), `PRESENCE_AEC_URL`(127.0.0.1:5005 — the `aec` sidecar), `PRESENCE_AEC_DELAY_MS`(auto), `PRESENCE_AEC_NS`(1), `PRESENCE_AEC_AGC`(1), `PRESENCE_STREAM_MIC_GAIN`(auto), `PRESENCE_STREAM_ARRAY_GAIN`(4.0).
 - **Gateway pipeline:** `PRESENCE_TRANSCRIBE`(compose 1), `PRESENCE_ASR_ENGINE`("" = gateway default; `gemma` | `parakeet`), `PRESENCE_LLM_INPUT`("" = gateway default; `audio` | `transcript`). Needs a gateway with Parakeet loaded; older gateways ignore the extra fields.
 - **VAD:** `PRESENCE_SILENCE_MS`(compose 900), `PRESENCE_NOISE_MULT`(1.7), `PRESENCE_CONTINUE_MULT`(1.3), `PRESENCE_SIL_MARGIN`(1.8), `PRESENCE_CALIB_PCTL`(50), `PRESENCE_MIN_FLOOR`(0.010, USB), `PRESENCE_USE_WEBRTCVAD`(0 — energy VAD default), `PRESENCE_RECALIB_SECS`(30), `PRESENCE_RECALIB_AVG_N`(5), `PRESENCE_FLOOR_TRIM`(0.9).
 - **Wave/diag:** `PRESENCE_WAVE`(1), `PRESENCE_WAVE_ACTION`(25), `PRESENCE_WAVE_HOLD`(2.5), `PRESENCE_TRANSCRIBE`(compose 1), `PRESENCE_DEBUG`(0).
@@ -185,3 +188,47 @@ makerspace facts; asks for a repeat when unsure.
 **Gateway (gemma-voice-agent PR #3):** past turns now go to vLLM as text only
 (multiple audio clips in one request crashed vLLM 0.26's Gemma-4 audio encoder);
 served-model name re-discovered after a vLLM restart; `vllm` restarts itself.
+
+---
+
+## 11. Streamed (WebSocket) mode, barge-in and echo cancellation — experimental
+
+**Status: built and exercised in simulation only. It has not run on the robot.**
+
+### What it is
+`presence.STREAM["transport"] = "ws"` (control centre → *Conversation link*) swaps the conversation loop: after the usual HTTP greeting, the mic is streamed to the gateway's `/ws/converse` (`streaming.py`) instead of being cut into utterances by the on-robot energy VAD. The gateway then decides when a turn starts and ends (Silero VAD + Smart Turn, the same logic as the Reachy Mini backend) and can be interrupted mid-reply. The goodbye still goes through `/converse`. Everything else (presence detection, prompts, the pipeline diagram, HEARD/REPLY) works as before. If the WebSocket can't be opened (old gateway, network), that visitor falls back to the HTTP loop.
+
+No new Python packages are needed on the robot for the link itself: `streaming.py` carries a small standard-library WebSocket client.
+
+### Echo cancellation
+With barge-in the mic is open while George talks, so his own voice must be removed from it or he interrupts himself. `aec.py` uses GStreamer's `webrtcdsp` + `webrtcechoprobe`, the elements the Reachy Mini SDK uses for software AEC. Two things differ from Reachy, both forced by the G1:
+
+- **No local playback to tap.** Reachy plays through a sound card, so its echo probe sits in the playback pipeline. George's speaker is driven over DDS (`PlayStream`), so the player reports each clip as it is sent and `aec.py` lays it on the mic's sample clock.
+- **It runs in a sidecar container.** The canceller needs GStreamer ≥ 1.24 (WebRTC "AEC3", which finds the speaker delay by itself). Jetson images are Ubuntu 20.04/22.04, whose GStreamer has the older canceller: in simulation that one only works when the reference is placed within ~20 ms of a 40 ms target, which a DDS speaker path is unlikely to hold. So `Dockerfile.aec` builds a small Debian image with a current GStreamer and `aec_server.py`; the client talks to it on `127.0.0.1:5005`.
+
+```bash
+# once, on the Orin (needs internet; pulls debian:trixie-slim)
+docker compose -f docker-compose.jetson.yml build aec
+docker compose -f docker-compose.jetson.yml up -d aec
+docker logs gemma-aec        # expect: [aec] listening on 127.0.0.1:5005 (AEC3)
+# then copy streaming.py + aec.py to ~/g1demo with the other client files and recreate gemma-client
+```
+
+Safety net: if echo cancellation is switched on but not reachable, the client keeps barge-in off (the gateway ignores the mic while George is replying or playing), so he can't interrupt himself. The status line in the card says which state he is in.
+
+For reference, Reachy's real robot doesn't use this software path at all: its XMOS mic array cancels echo in hardware. Whether the G1's own array stream is already echo-cancelled is unknown; a quick check is to switch echo cancellation **off**, leave barge-in **on**, and see whether George cuts himself off.
+
+### What to check on the robot, in this order
+1. **WebSocket, barge-in off.** Does he hear turns and answer? If speech is missed, raise *mic gain* (the array is quiet) or lower *speech threshold*; if noise starts turns, do the opposite or raise *speech needed to start a turn*.
+2. **`PlayStop`.** Barge-in cuts playback with `AudioClient.PlayStop("gemma")`. Untested on the G1.
+3. **Echo cancellation + barge-in.** Watch the status line: it reports the measured *speaker delay*. George should finish his sentences when nobody speaks, and stop within about half a second when someone does.
+4. **Crowd noise.** Silero is more robust than an energy gate, but it has never heard this mic in a hall. The HTTP loop remains the proven fallback.
+
+### Simulated results (off-robot, real gateway)
+A fake mic that hears a recorded visitor plus the fake speaker's output, delayed 150 ms:
+
+| Setup | Result |
+|---|---|
+| No echo cancellation, barge-in on | George interrupted himself on every reply (9 false barge-ins in 24 s) |
+| AEC3 (in-process or via the sidecar) | 4 sentences played with no false barge-in; a visitor talking over him stopped playback in ~0.5 s and was transcribed correctly |
+| Old canceller, reference misaligned by > ~20 ms | no cancellation |

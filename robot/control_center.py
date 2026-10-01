@@ -604,6 +604,74 @@ def _build_app(hub, store, controller, busy):
                   f"llm_input={presence.LLM_INPUT or '(gateway default)'}")
         return jsonify(_gateway_snapshot())
 
+    # Conversation link: HTTP (utterance per request, on-robot VAD) or the
+    # streamed WebSocket mode with gateway-side VAD / Smart Turn / barge-in and
+    # echo cancellation. presence.STREAM, read continuously by a live session.
+    STREAM_BOOLS = ("barge_in", "aec", "aec_noise_suppression", "aec_gain_control")
+    # gateway turn-detection options this UI can override (name -> is it a bool)
+    STREAM_VAD = {"vad_threshold": False, "vad_min_speech_ms": False, "vad_min_silence_ms": False,
+                  "vad_speech_pad_ms": False, "smart_turn": True, "smart_turn_threshold": False,
+                  "reopen_ms": False, "smart_turn_max_wait_ms": False, "smart_turn_incomplete_delay_ms": False}
+
+    def _stream_snapshot():
+        import presence
+        import aec
+        sess = presence.STREAM_SESSION
+        status = dict(sess.status) if sess is not None else dict(presence.STREAM_LAST_STATUS)
+        out = {"options": {**presence.STREAM, "vad": dict(presence.STREAM["vad"])},
+               "live": sess is not None, "status": status,
+               "echo_delay_ms": status.get("echo_delay_ms", presence._ECHO_DELAY_MS)}
+        # can echo cancellation run at all? (in this process, or the sidecar)
+        if aec.EchoCanceller.available():
+            out["aec_backend"] = "in-process"
+        else:
+            out["aec_backend"] = None
+            try:
+                host, _, port = aec.AEC_URL.rpartition(":")
+                import socket as _s
+                _s.create_connection((host or "127.0.0.1", int(port)), timeout=0.3).close()
+                out["aec_backend"] = "sidecar"
+            except Exception:
+                pass
+        return out
+
+    @app.route("/api/stream", methods=["GET", "POST"])
+    def api_stream():
+        import presence
+        if request.method == "POST":
+            body = request.get_json(force=True) or {}
+            o = presence.STREAM
+            if body.get("transport") in ("http", "ws"):
+                o["transport"] = body["transport"]
+            for k in STREAM_BOOLS:
+                if k in body:
+                    o[k] = bool(body[k])
+            for k in ("aec_delay_ms", "mic_gain"):
+                if k in body:
+                    v = body[k]
+                    try:
+                        o[k] = "auto" if v in (None, "", "auto") else max(0.0, float(v))
+                    except (TypeError, ValueError):
+                        pass
+            if isinstance(body.get("vad"), dict):
+                vad = dict(o["vad"])
+                for k, v in body["vad"].items():
+                    if k not in STREAM_VAD:
+                        continue
+                    if v is None:
+                        vad.pop(k, None)              # back to the gateway default
+                    else:
+                        try:
+                            vad[k] = bool(v) if STREAM_VAD[k] else float(v)
+                        except (TypeError, ValueError):
+                            pass
+                o["vad"] = vad                        # replaced whole, so a live session sees one consistent dict
+            if body.get("reset_vad"):
+                o["vad"] = {}
+            print(f"[web] conversation link: transport={o['transport']} barge_in={o['barge_in']} "
+                  f"aec={o['aec']} vad_overrides={o['vad']}")
+        return jsonify(_stream_snapshot())
+
     @app.route("/api/mic", methods=["POST"])
     def api_mic():
         v = getattr(controller, "vad", None)
@@ -806,6 +874,8 @@ select,input,textarea{background:rgba(5,8,13,.7);color:var(--fg);border:1px soli
 textarea{width:100%;font:12px/1.45 ui-monospace,monospace;resize:vertical}
 label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);display:block;margin:8px 0 3px}
 .tag{font-size:11px;color:var(--acc)}
+label.chk{display:inline-flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:12px;color:var(--fg);margin:0 10px 0 0;cursor:pointer}
+label.chk input{padding:0;accent-color:var(--acc)}
 .tune label{display:flex;justify-content:space-between;text-transform:none;letter-spacing:0;font-size:11px;color:var(--mut);margin:7px 0 1px}
 .tune label span{color:var(--fg);font:700 12px ui-monospace,monospace}
 .tune input[type=range]{width:100%;padding:0;accent-color:var(--acc);background:transparent;border:0;cursor:pointer}
@@ -862,6 +932,49 @@ label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--m
         <button id=calib>Run VAD calibration</button>
         <span class=tag id=calibst></span>
       </div>
+    </div>
+
+    <div class=card>
+      <h2>Conversation link · experimental</h2>
+      <div class=prow>
+        <label for=st_transport title="How George talks to the gateway during a conversation.">link</label>
+        <select id=st_transport>
+          <option value=http>HTTP · one utterance per request (robot VAD)</option>
+          <option value=ws>WebSocket · streamed (gateway VAD, barge-in)</option>
+        </select>
+      </div>
+      <div id=st_ws>
+        <div class=prow style=margin-top:8px>
+          <label class=chk title="Let the visitor talk over George: his reply stops and the new speech is answered."><input type=checkbox id=st_barge_in> barge-in</label>
+          <label class=chk title="Remove George's own voice from the mic (WebRTC echo canceller, as on Reachy Mini). Needed for barge-in."><input type=checkbox id=st_aec> echo cancellation</label>
+          <label class=chk title="The canceller's built-in noise suppression."><input type=checkbox id=st_aec_noise_suppression> noise suppression</label>
+          <label class=chk title="The canceller's built-in automatic gain control."><input type=checkbox id=st_aec_gain_control> auto gain</label>
+        </div>
+        <div class=prow>
+          <label for=st_mic_gain title="Gain applied to the mic before streaming. Empty = automatic (4x for the quiet G1 array, 1x for USB).">mic gain</label>
+          <input id=st_mic_gain type=number min=0 max=20 step=0.5 placeholder=auto style=width:84px>
+          <label for=st_aec_delay_ms title="Where the echo reference is placed after a clip is sent to the speaker. Empty = automatic. Only the older canceller needs a figure.">echo delay ms</label>
+          <input id=st_aec_delay_ms type=number min=0 max=1000 step=5 placeholder=auto style=width:84px>
+        </div>
+        <h2 style=margin-top:12px>Gateway turn detection</h2>
+        <div class=tune>
+          <label>speech threshold <span id=sv_vad_threshold>—</span></label><input type=range id=sx_vad_threshold min=0.2 max=0.95 step=0.05>
+          <label>speech needed to start a turn, ms <span id=sv_vad_min_speech_ms>—</span></label><input type=range id=sx_vad_min_speech_ms min=96 max=1200 step=32>
+          <label>silence that ends a segment, ms <span id=sv_vad_min_silence_ms>—</span></label><input type=range id=sx_vad_min_silence_ms min=32 max=800 step=32>
+          <label>pre-roll kept before speech, ms <span id=sv_vad_speech_pad_ms>—</span></label><input type=range id=sx_vad_speech_pad_ms min=0 max=1000 step=50>
+          <label>reply held after a finished turn, ms <span id=sv_reopen_ms>—</span></label><input type=range id=sx_reopen_ms min=0 max=3000 step=100>
+        </div>
+        <div class=prow style=margin-top:8px>
+          <label class=chk title="Judge from the audio whether the visitor has finished, instead of treating every pause as the end of the turn."><input type=checkbox id=sx_smart_turn> Smart Turn</label>
+        </div>
+        <div class=tune>
+          <label>Smart Turn threshold <span id=sv_smart_turn_threshold>—</span></label><input type=range id=sx_smart_turn_threshold min=0.1 max=0.9 step=0.05>
+          <label>reply held after an unfinished turn, ms <span id=sv_smart_turn_max_wait_ms>—</span></label><input type=range id=sx_smart_turn_max_wait_ms min=500 max=6000 step=100>
+          <label>wait before answering an unfinished turn, ms <span id=sv_smart_turn_incomplete_delay_ms>—</span></label><input type=range id=sx_smart_turn_incomplete_delay_ms min=0 max=3000 step=100>
+        </div>
+        <div class=prow style=margin-top:8px><button id=st_reset>Gateway defaults</button></div>
+      </div>
+      <div class=prow style=margin-top:6px><span class=tag id=st_status></span></div>
     </div>
 
     <div class=card>
@@ -1111,6 +1224,51 @@ $('micsrc').onchange=()=>{const src=$('micsrc').value;$('micst').textContent='sw
     .then(r=>r.json()).then(d=>{$('micst').textContent=d.ok?('using '+d.mic_source+' · recalibrates when idle'):(d.error||'failed');loadTune();});};
 TKEYS.forEach(k=>{const el=$('t_'+k); if(el)el.oninput=()=>{$('v_'+k).textContent=el.value;
   clearTimeout(tuneT);tuneT=setTimeout(()=>fetch('/api/tune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:parseFloat(el.value)})}),200);};});
+// conversation link: HTTP vs streamed WebSocket, barge-in, echo cancellation, and
+// this robot's overrides of the gateway's turn detection (applied live)
+const ST_BOOLS=['barge_in','aec','aec_noise_suppression','aec_gain_control'];
+const ST_VAD=['vad_threshold','vad_min_speech_ms','vad_min_silence_ms','vad_speech_pad_ms','reopen_ms',
+              'smart_turn_threshold','smart_turn_max_wait_ms','smart_turn_incomplete_delay_ms'];
+// the gateway's stock values, shown until a live session reports what is in effect
+const ST_DEF={vad_threshold:0.6,vad_min_speech_ms:384,vad_min_silence_ms:64,vad_speech_pad_ms:500,reopen_ms:800,
+              smart_turn:true,smart_turn_threshold:0.5,smart_turn_max_wait_ms:2000,smart_turn_incomplete_delay_ms:600};
+let stBusy=false;
+function showStream(d){
+  const o=d.options, gw=(d.status&&d.status.gateway)||{}, s=d.status||{};
+  $('st_transport').value=o.transport;
+  $('st_ws').style.display=o.transport==='ws'?'':'none';
+  ST_BOOLS.forEach(k=>{$('st_'+k).checked=!!o[k];});
+  ['mic_gain','aec_delay_ms'].forEach(k=>{ if(document.activeElement!==$('st_'+k))$('st_'+k).value=(o[k]==='auto'||o[k]==null)?'':o[k]; });
+  const eff=k=>(k in o.vad)?o.vad[k]:((k in gw)?gw[k]:ST_DEF[k]);
+  ST_VAD.forEach(k=>{const el=$('sx_'+k); if(document.activeElement!==el)el.value=eff(k);
+    $('sv_'+k).textContent=eff(k)+((k in o.vad)?'':' · default');});
+  $('sx_smart_turn').checked=!!eff('smart_turn');
+  const bits=[];
+  if(o.transport==='ws'){
+    bits.push(d.live?(s.connected?'streaming':'connecting…'):'idle until the next visitor');
+    if(o.aec)bits.push('echo cancellation: '+(d.live?(s.aec||'starting'):(d.aec_backend?('ready ('+d.aec_backend+')'):'NOT AVAILABLE — start the aec service')));
+    if(d.live)bits.push('barge-in '+(s.barge_in?'on':'off'+(o.barge_in?' (waiting for the echo delay)':'')));
+    if(o.barge_in&&(!o.aec||!d.aec_backend)&&!d.live)bits.push('⚠ barge-in without echo cancellation: George will interrupt himself');
+    if(d.echo_delay_ms!=null)bits.push('speaker delay '+Math.round(d.echo_delay_ms)+' ms');
+    if(gw.smart_turn_available===false)bits.push('Smart Turn is not loaded on the gateway');
+    if(s.error)bits.push('error: '+s.error);
+  } else bits.push('using the robot VAD and /converse');
+  $('st_status').textContent=bits.join(' · ');
+}
+function loadStream(){ if(stBusy)return; fetch('/api/stream').then(r=>r.json()).then(showStream).catch(()=>{}); }
+function saveStream(body){ stBusy=true;
+  fetch('/api/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{stBusy=false;showStream(d);}).catch(()=>{stBusy=false;}); }
+$('st_transport').onchange=()=>saveStream({transport:$('st_transport').value});
+ST_BOOLS.forEach(k=>{$('st_'+k).onchange=()=>saveStream({[k]:$('st_'+k).checked});});
+['mic_gain','aec_delay_ms'].forEach(k=>{$('st_'+k).onchange=()=>saveStream({[k]:$('st_'+k).value});});
+let stT;
+ST_VAD.forEach(k=>{const el=$('sx_'+k); el.oninput=()=>{$('sv_'+k).textContent=el.value;
+  clearTimeout(stT);stT=setTimeout(()=>saveStream({vad:{[k]:parseFloat(el.value)}}),200);};});
+$('sx_smart_turn').onchange=()=>saveStream({vad:{smart_turn:$('sx_smart_turn').checked}});
+$('st_reset').onclick=()=>saveStream({reset_vad:true});
+loadStream(); setInterval(loadStream,2000);
+
 // gateway pipeline: transcript engine + what Gemma answers from (applies to the next turn)
 function showGw(d){
   $('gw_heard').value=d.transcribe?(d.asr_engine||(d.gateway_default&&d.gateway_default.asr_engine)||'gemma'):'off';

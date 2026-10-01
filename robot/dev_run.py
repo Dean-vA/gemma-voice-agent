@@ -102,6 +102,16 @@ class LocalAudio:
         except Exception as e:
             print(f"[dev] play failed: {e}")
 
+    def PlayStop(self, name):
+        """Cut playback short (barge-in in the streamed mode)."""
+        try:
+            if self.backend == "winsound":
+                self._winsound.PlaySound(None, self._winsound.SND_PURGE)
+            elif self.backend == "sounddevice":
+                self._sd.stop()
+        except Exception as e:
+            print(f"[dev] stop failed: {e}")
+
     # no-op robot controls
     def LedControl(self, r, g, b): pass
     def SetVolume(self, v): pass

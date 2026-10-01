@@ -161,6 +161,33 @@ CONV_TRANSCRIBE = os.environ.get("PRESENCE_TRANSCRIBE", "").strip().lower() in (
 ASR_ENGINE = os.environ.get("PRESENCE_ASR_ENGINE", "").strip().lower()
 LLM_INPUT  = os.environ.get("PRESENCE_LLM_INPUT", "").strip().lower()
 
+# --- Streamed (WebSocket) conversation mode: experimental --------------------
+# "http" (default) is the loop this client has always run: record one utterance
+# with the on-robot VAD, POST it, play the reply, listen again. "ws" streams the
+# mic to the gateway's /ws/converse instead, which does the turn-taking (Silero
+# VAD + Smart Turn) and allows barge-in. See streaming.py and aec.py. All of it
+# is switchable live from the control centre.
+STREAM = {
+    "transport": os.environ.get("PRESENCE_TRANSPORT", "http").strip().lower(),   # http | ws
+    # let the visitor talk over George (needs echo cancellation to be usable)
+    "barge_in": os.environ.get("PRESENCE_BARGE_IN", "1").strip().lower() in ("1", "true", "yes", "on"),
+    # remove George's own voice from the mic (aec.py)
+    "aec": os.environ.get("PRESENCE_AEC", "1").strip().lower() in ("1", "true", "yes", "on"),
+    "aec_delay_ms": os.environ.get("PRESENCE_AEC_DELAY_MS", "auto"),   # "auto" or a figure in ms
+    "aec_noise_suppression": os.environ.get("PRESENCE_AEC_NS", "1").strip().lower() in ("1", "true", "yes", "on"),
+    "aec_gain_control": os.environ.get("PRESENCE_AEC_AGC", "1").strip().lower() in ("1", "true", "yes", "on"),
+    # gain applied to the mic before streaming; "auto" = STREAM_ARRAY_GAIN for
+    # the (quiet) G1 array, 1.0 for a USB mic
+    "mic_gain": os.environ.get("PRESENCE_STREAM_MIC_GAIN", "auto"),
+    # overrides of the gateway's turn-detection settings for this robot's
+    # connection (see VAD_OPTIONS in app/realtime.py); empty = gateway defaults
+    "vad": {},
+}
+STREAM_ARRAY_GAIN = float(os.environ.get("PRESENCE_STREAM_ARRAY_GAIN", "4.0"))
+STREAM_SESSION = None       # the live streaming.StreamSession, if any (for the control centre)
+STREAM_LAST_STATUS = {}     # status of the most recent streamed conversation
+_ECHO_DELAY_MS = None       # speaker delay measured in an earlier conversation
+
 # --- Instructions (env-overridable) -----------------------------------------
 GREET_INSTRUCTION = os.environ.get(
     "PRESENCE_GREET_INSTRUCTION",
@@ -1182,7 +1209,14 @@ class PresenceController(threading.Thread):
                 print(f"[presence][dbg] mic open -> {opened}")
             quiet = 0
             departed = False
-            while not self._stop.is_set():
+            streamed = STREAM.get("transport") == "ws"
+            if streamed:
+                reason = self._converse_streamed()
+                departed = reason == "left"
+                if reason == "error":
+                    print("[presence] streamed mode failed -> HTTP mode for this visitor")
+                    streamed = False
+            while not streamed and not self._stop.is_set():
                 # presence check between/while waiting for utterances
                 if not self._present_now(STAY_FRAC):
                     if (time.time() - self.last_seen) >= CONV_DISARM_SECS:
@@ -1235,6 +1269,88 @@ class PresenceController(threading.Thread):
             self.busy.clear()
             if self.enabled:
                 self.set_led(self.audio, 0, 60, 30)        # back to dim green
+
+    # -- streamed (WebSocket) conversation ------------------------------------
+    def _converse_streamed(self):
+        """Hold the conversation over the gateway's /ws/converse: the mic is
+        streamed, the gateway decides when a turn ends, and the visitor can talk
+        over the reply. Returns why it ended: "left" (visitor walked away),
+        "stopped" (disarmed / switched back to HTTP) or "error"."""
+        global STREAM_SESSION, STREAM_LAST_STATUS, _ECHO_DELAY_MS
+        import streaming
+        vad = self.vad
+        try:
+            vad._open_stream()
+        except Exception as e:
+            print(f"[presence] mic stream open failed: {e}")
+            return "error"
+
+        class _Mic:
+            read = staticmethod(vad._read_frame16)       # one 30 ms frame @16 kHz; raises MicStall
+
+        def opts():
+            o = dict(STREAM)
+            o.update(instruction=_prompt("converse"), transcribe=CONV_TRANSCRIBE,
+                     asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE)
+            if o.get("mic_gain") in (None, "", "auto"):
+                o["mic_gain"] = STREAM_ARRAY_GAIN if vad._open_src == "array" else 1.0
+            return o
+
+        def play(pcm):
+            self.seq_ref[0] += 1
+            self.audio.PlayStream("gemma", str(self.seq_ref[0]), pcm)
+
+        def stop_playback():
+            stop = getattr(self.audio, "PlayStop", None)
+            if stop is not None:
+                stop("gemma")
+
+        # Face detection takes tens of ms a frame: keep it off the audio thread.
+        left = threading.Event()
+        watching = threading.Event()
+        watching.set()
+
+        def watch():
+            while watching.is_set():
+                try:
+                    if self._present_now(STAY_FRAC):
+                        self.last_seen = time.time()
+                    elif (time.time() - self.last_seen) >= CONV_DISARM_SECS:
+                        left.set()
+                        return
+                except Exception as e:
+                    print(f"[presence] presence check failed: {e}")
+                time.sleep(1.0 / max(1.0, DETECT_FPS))
+
+        def keep_going():
+            if left.is_set():
+                return "left"
+            if self._stop.is_set() or not self.enabled or STREAM.get("transport") != "ws":
+                return "stopped"
+            return ""
+
+        url = ("wss://" if GEMMA_URL.startswith("https") else "ws://") + GEMMA_URL.split("://", 1)[-1] + "/ws/converse"
+        session = streaming.StreamSession(
+            url, self._session, opts, _Mic, play, stop_playback,
+            lambda wav: self.wav_to_pcm16k(_wav_path(wav), self.gain),
+            pub=_pub, grab_image=_grab_jpeg,
+            set_led=lambda r, g, b: self.set_led(self.audio, r, g, b),
+            drain_pad=SPEAK_DRAIN_PAD, echo_delay_ms=_ECHO_DELAY_MS)
+        STREAM_SESSION = session
+        print(f"[presence] streamed conversation over {url}")
+        threading.Thread(target=watch, daemon=True).start()
+        try:
+            reason = session.run(keep_going)
+        finally:
+            watching.clear()
+            vad._close_stream()
+            STREAM_SESSION = None
+            STREAM_LAST_STATUS = dict(session.status)
+            if session.status.get("echo_delay_ms") is not None:
+                _ECHO_DELAY_MS = session.status["echo_delay_ms"]
+        if reason == "left":
+            print("[presence] person left mid-conversation")
+        return reason
 
     # -- goodbye + wave -------------------------------------------------------
     def _wave(self):

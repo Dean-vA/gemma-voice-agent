@@ -41,6 +41,8 @@ G1 head speaker ◀─ DDS PlayStream ◀──┴──────────
 | `presence.py` | Face detection, VAD, greet → converse → goodbye state machine |
 | `control_center.py` | In-process Flask control centre (single-page UI embedded) |
 | `usb_cam.py`, `usb_mic.py` | Camera handle, USB mic discovery |
+| `streaming.py` | Experimental streamed (WebSocket) conversation mode with barge-in; see `CONTROL_CENTRE.md` §11 |
+| `aec.py`, `aec_server.py`, `Dockerfile.aec` | Echo cancellation for that mode (GStreamer `webrtcdsp`, run as a sidecar container) |
 | `converse_mode.py` | `/converse` client used by F1 push-to-talk |
 | `prompts.json` | Prompt presets (greet / converse / goodbye); edited live from the UI |
 | `docker-compose.jetson.yml` | Robot deployment (Piper + client containers) |

@@ -36,6 +36,20 @@ services:
       - --port
       - "5000"
 
+  # Echo cancellation for the streamed (WebSocket) mode: GStreamer's webrtcdsp,
+  # as in the Reachy Mini SDK, in its own container because it needs a newer
+  # GStreamer than the client image has. Optional: without it the streamed mode
+  # still runs, with barge-in best left off.
+  #   docker compose -f docker-compose.jetson.yml build aec
+  aec:
+    build:
+      context: .
+      dockerfile: Dockerfile.aec
+    image: g1-aec:latest
+    container_name: gemma-aec
+    network_mode: host          # the client reaches it on 127.0.0.1:5005
+    restart: unless-stopped
+
   gemma-client:
     image: g1-greeter-shadow:latest
     container_name: gemma-g1-client
@@ -90,6 +104,14 @@ services:
       # gateway pipeline (also switchable live in the control centre): empty = gateway default
       - PRESENCE_ASR_ENGINE=${PRESENCE_ASR_ENGINE:-}     # gemma | parakeet
       - PRESENCE_LLM_INPUT=${PRESENCE_LLM_INPUT:-}       # audio | transcript (cascade via Parakeet)
+      # conversation link (also switchable live in the control centre):
+      #   http = one utterance per request, on-robot VAD (default)
+      #   ws   = streamed to the gateway, which does VAD / Smart Turn / barge-in
+      - PRESENCE_TRANSPORT=${PRESENCE_TRANSPORT:-http}
+      - PRESENCE_BARGE_IN=${PRESENCE_BARGE_IN:-1}
+      - PRESENCE_AEC=${PRESENCE_AEC:-1}                       # echo cancellation (needs the aec service)
+      - PRESENCE_AEC_URL=${PRESENCE_AEC_URL:-127.0.0.1:5005}
+      - PRESENCE_STREAM_MIC_GAIN=${PRESENCE_STREAM_MIC_GAIN:-auto}
       # web control centre (in-process Flask; network_mode host -> reachable on :PORT)
       - PRESENCE_WEB=${PRESENCE_WEB:-1}
       - PRESENCE_WEB_PORT=${PRESENCE_WEB_PORT:-8080}
@@ -101,6 +123,8 @@ services:
       - ./usb_cam.py:/app/usb_cam.py:ro
       - ./presence.py:/app/presence.py:ro
       - ./control_center.py:/app/control_center.py:ro
+      - ./streaming.py:/app/streaming.py:ro
+      - ./aec.py:/app/aec.py:ro
       - ./prompts.json:/app/prompts.json:rw
     entrypoint: ["sh","-c","pip install sounddevice opencv-python-headless webrtcvad-wheels >/dev/null 2>&1; apt-get install -y libportaudio2 >/dev/null 2>&1 || true; exec python3 /app/g1_gemma_client.py ${G1_IFACE:-eth0}"]
     stdin_open: true
