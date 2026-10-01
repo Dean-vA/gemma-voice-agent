@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.vad.segmenter import CHUNK_SAMPLES, Segmenter, SpeechStarted, SpeechStopped
+from app.vad.segmenter import CHUNK_SAMPLES, Segmenter, SpeechStarted, SpeechStopped, VADConfig
 
 PAD = 8000  # 500 ms pre-roll in samples
 
@@ -106,3 +106,13 @@ def test_skip_advances_clock_and_drops_state():
     assert not seg.triggered and seg.total_samples == 15 * CHUNK_SAMPLES
     stopped = run(seg, [0.9] * 15 + [0.0] * 3)[-1]
     assert stopped.start_sample == 15 * CHUNK_SAMPLES  # nothing from before the skip
+
+
+def test_configure_applies_new_thresholds_mid_stream():
+    seg = Segmenter()
+    assert run(seg, [0.9] * 6) == []                       # 384 ms bar not reached yet
+    seg.configure(VADConfig(min_speech_ms=192, min_silence_ms=320))
+    (ev,) = run(seg, [0.9])                                # now past the lowered bar
+    assert isinstance(ev, SpeechStarted)
+    assert run(seg, [0.0] * 10) == []                      # 320 ms of silence: still open
+    assert isinstance(run(seg, [0.0] * 2)[-1], SpeechStopped)
