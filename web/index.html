@@ -70,12 +70,17 @@
           <select id="lat-runs" class="tts-select" title="Timed runs per clip per configuration">
             <option value="1" selected>1 run</option><option value="3">3 runs</option>
           </select>
+          <select id="lat-asr" class="tts-select" title="Which engine writes the transcript in the cascade configuration">
+            <option value="both" selected>transcript: Parakeet + Gemma</option>
+            <option value="parakeet">transcript: Parakeet</option>
+            <option value="gemma">transcript: Gemma</option>
+          </select>
           <span class="eval-hint" id="lat-status">Replays the clips recorded in ASR eval through the full pipeline, with the selected voice. Repeat runs of a clip hit vLLM's prompt cache and look faster than a fresh utterance.</span>
         </div>
         <div class="eval-summary" id="lat-summary"></div>
         <div class="eval-scroll">
           <table class="eval-table">
-            <thead><tr><th>Clip</th><th>Sentence</th><th>Hears audio</th><th>Reads transcript</th><th>Difference</th></tr></thead>
+            <thead id="lat-head"></thead>
             <tbody id="lat-rows"></tbody>
           </table>
         </div>

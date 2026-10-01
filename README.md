@@ -152,8 +152,9 @@ switches to a cascade: Parakeet transcribes the turn and Gemma answers from that
 text, with no audio in the prompt.
 
 To compare the two on time to first speech, open the **Speech latency** tab: it
-replays the clips recorded in ASR eval through `/converse` in both
-configurations and reports, per clip and overall, how long until the first
+replays the clips recorded in ASR eval through `/converse` with Gemma hearing
+the audio and with Gemma reading a transcript (written by Parakeet, by Gemma, or
+both side by side; pick with the selector or `--asr-engines`) and reports, per clip and overall, how long until the first
 spoken sentence is ready (with ASR, LLM first token and first-sentence TTS
 broken out). The same as a script, with a CSV:
 

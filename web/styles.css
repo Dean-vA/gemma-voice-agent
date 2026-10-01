@@ -113,6 +113,7 @@ main {
 
 /* ---------- ASR eval mode ---------- */
 .transcript[hidden], .eval-view[hidden] { display: none; }
+.eval-table td.num small { color: var(--muted); }
 .eval-table td.num.faster { color: var(--good); }
 .eval-table td.num.slower { color: var(--warn); }
 .eval-card .parts { color: var(--muted); font: 11px var(--mono); margin-top: 6px; line-height: 1.6; }
