@@ -204,6 +204,10 @@ STREAM = {
     # gain applied to the mic before streaming; "auto" = STREAM_ARRAY_GAIN for
     # the (quiet) G1 array, 1.0 for a USB mic
     "mic_gain": os.environ.get("PRESENCE_STREAM_MIC_GAIN", "auto"),
+    # Send silence (not the mic) for the first N ms of each reply: George's own
+    # echo arrives ~0.4 s after he starts, before the canceller has adapted, and
+    # interrupted him at 8-28% of his first sentence. Visitors don't barge in that fast.
+    "barge_holdoff_ms": float(os.environ.get("PRESENCE_BARGE_HOLDOFF_MS", "1000")),
     # overrides of the gateway's turn-detection settings for this robot's
     # connection (see VAD_OPTIONS in app/realtime.py); empty = gateway defaults
     "vad": {},

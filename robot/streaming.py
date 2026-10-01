@@ -259,6 +259,7 @@ class StreamSession:
                  on_prompt=None) -> None:
         self.url, self.session_id, self.opts = url, session_id, opts
         self.on_prompt = on_prompt        # (prompt, reply) -> None, e.g. a log line
+        self._play_t0 = None               # when the current reply started playing
         self.mic, self.pub = mic, (pub or (lambda *a, **k: None))
         self.grab_image, self.set_led = grab_image, (set_led or (lambda *a: None))
         # echo_delay_ms: the speaker delay measured in an earlier session, if any
@@ -371,6 +372,7 @@ class StreamSession:
         print(f"[stream] reply cut at sentence {index} ({fraction:.0%} played)")
 
     def _on_playback(self, active: bool) -> None:
+        self._play_t0 = time.time() if active else None     # start of this reply's playback
         self.pub("speaking", on=active)
         try:
             if self._ws is not None:
@@ -533,7 +535,10 @@ class StreamSession:
                 self._clock.advance(len(frame))
                 self._track_delay(frame)
                 if self._aec is not None:
-                    frame = self._aec.process(frame)
+                    frame = self._aec.process(frame)      # keeps adapting during the hold-off
+                hold = float(self.opts().get("barge_holdoff_ms", 0) or 0)
+                if hold and self._play_t0 is not None and (time.time() - self._play_t0) * 1000.0 < hold:
+                    frame = np.zeros_like(frame)          # reply just started: no echo barge-in
                 if n % 3 == 0:
                     f = frame.astype(np.float32) / 32768.0
                     self.pub("vad", level=round(float(np.sqrt(np.mean(f * f))), 4), active=True)

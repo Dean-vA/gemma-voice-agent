@@ -114,6 +114,9 @@ services:
       - PRESENCE_AEC=${PRESENCE_AEC:-1}                       # echo cancellation (needs the aec service)
       - PRESENCE_AEC_URL=${PRESENCE_AEC_URL:-127.0.0.1:5005}
       - PRESENCE_STREAM_MIC_GAIN=${PRESENCE_STREAM_MIC_GAIN:-auto}
+      - PRESENCE_BARGE_HOLDOFF_MS=${PRESENCE_BARGE_HOLDOFF_MS:-1000}  # no barge-in for the first 1 s of a reply (echo)
+      # arm presence mode as soon as the client starts (it restarts with the robot)
+      - PRESENCE_AUTOARM=${PRESENCE_AUTOARM:-1}
       # web control centre (in-process Flask; network_mode host -> reachable on :PORT)
       - PRESENCE_WEB=${PRESENCE_WEB:-1}
       - PRESENCE_WEB_PORT=${PRESENCE_WEB_PORT:-8080}
