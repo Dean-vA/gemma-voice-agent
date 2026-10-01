@@ -58,6 +58,12 @@ from app.vad.segmenter import CHUNK_SAMPLES, SAMPLE_RATE, Segmenter, SpeechStart
 
 log = logging.getLogger(__name__)
 
+# Context for the turn after a barge-in. It goes in that turn's instruction, not
+# in George's stored words: a marker inside the reply text got read out aloud
+# ("... [interrupted by the visitor].") when the visitor asked him to repeat.
+_INTERRUPTED_NOTE = ("(The visitor interrupted your last reply mid-sentence; "
+                     "they did not hear the rest of it.)")
+
 # How long a release waits on unconfirmed speech before giving up on it
 # (SpeculativeTurnTracker._PENDING_REOPEN_WAIT_TIMEOUT_S upstream).
 _PENDING_REOPEN_TIMEOUT_S = 2.0
@@ -121,6 +127,7 @@ class RealtimeSession:
         self._playing = False             # client reports TTS playback in progress
         self._turn: _Turn | None = None
         self._last_reply: _Turn | None = None   # newest turn whose reply is in the history
+        self._interrupted = False               # last reply was cut off: say so on the next turn
         self._remainder = np.zeros(0, dtype=np.float32)
         self._gated = False
 
@@ -230,7 +237,8 @@ class RealtimeSession:
         words = turn.sentences[index].split()
         partial = " ".join(words[: int(len(words) * fraction)])
         said = " ".join(t for t in [*spoken, partial] if t).strip()
-        turn.stored_reply.text = (said + " — " if said else "") + "[interrupted by the visitor]"
+        turn.stored_reply.text = (said + " —") if said else "—"
+        self._interrupted = True
         log.info("barge-in: history keeps what was spoken (%d of %d sentences, %.0f%% of the last)",
                  len(spoken), len(turn.sentences), fraction * 100)
 
@@ -352,10 +360,17 @@ class RealtimeSession:
             if delay_s:
                 await asyncio.sleep(delay_s)
 
+            # After a barge-in, this reply is the first to see it. Recomputed on
+            # every attempt; only cleared once the turn is released (committed),
+            # so a reopened turn still carries it.
+            instruction = self.instruction
+            if self._interrupted:
+                instruction = f"{_INTERRUPTED_NOTE} {instruction}".strip()
+
             async def _pump() -> None:
                 try:
                     async for item in self._turn_events(
-                        self._sid(), turn.audio, self.instruction, timer,
+                        self._sid(), turn.audio, instruction, timer,
                         transcribe=self.transcribe, asr_engine=self.asr_engine, llm_input=self.llm_input,
                         speak=self.speak, engine=self.engine,
                         image_bytes=turn.image, state=turn.state, commit=False,
@@ -370,6 +385,7 @@ class RealtimeSession:
 
             await self._wait_for_release(soft_end + grace_s)
             turn.committed = True
+            self._interrupted = False
             held_ms = (time.monotonic() - soft_end) * 1000.0
             await self._send("speech_stopped", {"audio_start_ms": round(_ms(turn.start_sample)),
                                                "audio_end_ms": round(_ms(turn.end_sample))})
