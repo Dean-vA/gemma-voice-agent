@@ -1349,10 +1349,15 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
     subt('spk','playback'); if(spn)spn.classList.remove('cut');
   }
   node('spk',secs(m.tts_audio_seconds));
-  $('t_total').textContent=fmt(h.total_ms);
+  // Streamed mode: the robot only sees a turn once the gateway releases it (the
+  // reply is prepared during the hold), so its own hops are near zero. Use the
+  // gateway's figures, counted from the end of the visitor's speech.
+  const wsT=DIAG.mode==='ws', epT=(comp.endpoint||0);
+  $('t_total').textContent=fmt(wsT&&m.total_ms!=null?epT+m.total_ms:h.total_ms);
   $('t_ttft').textContent=fmt(m.ttft_ms!=null?m.ttft_ms:h.first_token_ms);
   $('t_tps').textContent=m.tokens_per_sec?m.tokens_per_sec.toFixed(0):'—';
-  $('t_fa').textContent=fmt(h.first_audio_ms!=null?h.first_audio_ms:m.time_to_first_audio_ms);
+  $('t_fa').textContent=fmt(wsT&&m.time_to_first_audio_ms!=null?epT+m.time_to_first_audio_ms
+                          :(h.first_audio_ms!=null?h.first_audio_ms:m.time_to_first_audio_ms));
   $('heard').textContent=t.heard||'—'; $('reply').textContent=t.reply||'—';
   if(s.has_image)$('lastimg').src='/last_image.jpg?t='+Math.floor(Date.now()/800);
 };

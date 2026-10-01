@@ -233,6 +233,8 @@ STREAM = {
     "barge_gate": os.environ.get("PRESENCE_BARGE_GATE", "1").strip().lower() in ("1", "true", "yes", "on"),
     "barge_gate_mult": float(os.environ.get("PRESENCE_BARGE_GATE_MULT", "3.0")),
     "barge_gate_min": float(os.environ.get("PRESENCE_BARGE_GATE_MIN", "0.02")),
+    # George's echo level assumed until it has been measured (p90 at x1.5 speech gain)
+    "barge_echo_default": float(os.environ.get("PRESENCE_BARGE_ECHO_DEFAULT", "0.04")),
     # overrides of the gateway's turn-detection settings for this robot's
     # connection (see VAD_OPTIONS in app/realtime.py); empty = gateway defaults
     "vad": {},
