@@ -916,6 +916,50 @@ class VadCapture:
 
 
 # ========================= /converse turn (with instruction) =================
+# The persona (the active profile's "converse" text) is the session's SYSTEM
+# prompt on the gateway (POST /persona), set when a visitor arrives, instead of
+# being re-sent inside every turn's message, where Gemma reads it as a fresh
+# instruction each time (re-introductions, drifting back to the intro).
+_PERSONA_SENT = {}     # session_id -> persona text the gateway holds for it
+_PERSONA_FAILED = {}   # session_id -> persona text the gateway refused (don't retry)
+
+
+def _set_persona(session_id, persona, reset):
+    try:
+        r = httpx.post(f"{GEMMA_URL}/persona", timeout=3.0,
+                       data={"session_id": session_id, "system_prompt": persona,
+                             "reset_history": "true" if reset else "false"})
+        return r.status_code == 200 and bool(r.json().get("ok"))
+    except Exception as e:
+        print(f"[presence] persona not set ({e}); sending it with each turn instead")
+        return False
+
+
+def _persona_instruction(session_id):
+    """What a conversation turn should send as its instruction: nothing when the
+    session's system prompt already holds the persona. An edited persona is
+    pushed first (history kept). If the gateway can't take it, the persona goes
+    in the instruction as before."""
+    persona = _prompt("converse")
+    if not session_id or not persona:
+        return persona
+    sent = _PERSONA_SENT.get(session_id)
+    if sent == persona:
+        return ""
+    if _PERSONA_FAILED.get(session_id) == persona:
+        return persona
+    # First time for this session (a new visitor): reset its history too.
+    if _set_persona(session_id, persona, reset=sent is None):
+        _PERSONA_SENT[session_id] = persona
+        while len(_PERSONA_SENT) > 50:                  # old visitors
+            _PERSONA_SENT.pop(next(iter(_PERSONA_SENT)))
+        print(f"[presence] persona -> system prompt for {session_id} ({len(persona)} chars)"
+              + ("" if sent is None else ", updated"))
+        return ""
+    _PERSONA_FAILED[session_id] = persona
+    return persona
+
+
 # What the gateway's history records as the visitor's line for turns made from
 # silence (otherwise "(the user spoke; audio not retained)").
 _PHASE_NOTES = {
@@ -1265,6 +1309,7 @@ class PresenceController(threading.Thread):
         # Fresh session per arrival: greeting + all turns + goodbye share history,
         # but a new visitor starts a clean conversation.
         self._session = f"g1p-{uuid.uuid4().hex[:8]}"
+        _persona_instruction(self._session)        # persona -> this session's system prompt
         try:
             self.set_led(self.audio, 200, 120, 0)          # amber: thinking
             frame = _grab_jpeg()
@@ -1335,7 +1380,7 @@ class PresenceController(threading.Thread):
                 frame = _grab_jpeg()
                 wav = _float_to_wav_bytes(clip)
                 heard, reply = _converse_turn(
-                    self.audio, wav, frame, _prompt("converse"),
+                    self.audio, wav, frame, _persona_instruction(self._session),
                     self.set_led, self.wav_to_pcm16k, self.gain, self.seq_ref,
                     transcribe=CONV_TRANSCRIBE, session_id=self._session,
                     phase="converse")
@@ -1374,7 +1419,7 @@ class PresenceController(threading.Thread):
 
         def opts():
             o = dict(STREAM)
-            o.update(instruction=_prompt("converse"), transcribe=CONV_TRANSCRIBE,
+            o.update(instruction=_persona_instruction(self._session), transcribe=CONV_TRANSCRIBE,
                      asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE,
                      debug_prompt=LOG_PROMPTS)
             if o.get("mic_gain") in (None, "", "auto"):
@@ -1497,7 +1542,7 @@ class PresenceController(threading.Thread):
             self.set_led(self.audio, 200, 120, 0)          # amber: thinking
             frame = _grab_jpeg()
             heard, reply = _converse_turn(
-                self.audio, wav_bytes, frame, _prompt("converse"),
+                self.audio, wav_bytes, frame, _persona_instruction(self._web_session),
                 self.set_led, self.wav_to_pcm16k, self.gain, self.seq_ref,
                 transcribe=True, session_id=self._web_session, phase="converse")
             print(f"[presence] (web) heard={heard!r} reply={reply!r}")
