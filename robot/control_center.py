@@ -130,7 +130,7 @@ class Hub:
                     self.last_image_jpeg = img
                     d["image_bytes"] = len(img)
                 self.current = {"hops": {}, "metrics": {}, "heard": "",
-                                "reply": "", **d}
+                                "reply": "", "t": time.time(), **d}
             elif ev in ("first_token", "first_audio"):
                 if self.current is not None:
                     self.current["hops"][ev + "_ms"] = d.get("ms")
@@ -148,6 +148,7 @@ class Hub:
                 cur["metrics"] = d.get("metrics") or {}
                 cur["heard"] = d.get("heard", "")
                 cur["reply"] = d.get("reply", "")
+                cur["prompt"] = d.get("prompt")
                 cur["hops"]["total_ms"] = d.get("total_ms")
                 self.turns.append(cur)
                 self.last_turn = cur
@@ -672,6 +673,23 @@ def _build_app(hub, store, controller, busy):
                   f"aec={o['aec']} vad_overrides={o['vad']}")
         return jsonify(_stream_snapshot())
 
+    @app.route("/api/conversation")
+    def api_conversation():
+        """The current (or most recent) visitor's session, turn by turn, with the
+        prompt Gemma answered from when the gateway returned it."""
+        with hub._lock:
+            turns = list(hub.turns)
+            live = dict(hub.current) if hub.current is not None else None
+        session = (live or (turns[-1] if turns else {})).get("session")
+        out = [{"phase": t.get("phase"), "t": t.get("t"), "heard": t.get("heard", ""),
+                "reply": t.get("reply", ""), "prompt": t.get("prompt"),
+                "total_ms": (t.get("hops") or {}).get("total_ms")}
+               for t in turns if session and t.get("session") == session]
+        if live and live.get("session") == session:
+            out.append({"phase": live.get("phase"), "t": live.get("t"), "heard": live.get("heard", ""),
+                        "reply": live.get("reply", ""), "prompt": None, "in_progress": True})
+        return jsonify({"session": session, "turns": out})
+
     @app.route("/api/volume", methods=["GET", "POST"])
     def api_volume():
         audio = getattr(controller, "audio", None)
@@ -856,10 +874,23 @@ button.primary.on{background:linear-gradient(90deg,var(--acc),#2bb87c);color:#04
 @keyframes dash{to{stroke-dashoffset:-14}}
 .node.talking .nbox{stroke:var(--acc);filter:url(#glow)}
 .node.cut .nbox{stroke:var(--warn)}
+#cv_turns{display:flex;flex-direction:column;gap:10px;margin-top:10px;max-height:560px;overflow:auto}
+.cvt{border:1px solid var(--line);border-radius:12px;padding:9px 12px;background:var(--glass2)}
+.cvt .ph{font:700 10px ui-sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--acc2)}
+.cvt .ln{font-size:13px;margin-top:4px;word-break:break-word}
+.cvt .ln b{color:var(--mut);font-weight:600;margin-right:6px}
+.cvt details{margin-top:6px}
+.cvt summary{cursor:pointer;color:var(--mut);font-size:12px}
+.cvmsg{font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word;margin-top:5px;padding:5px 8px;border-radius:8px;background:rgba(5,8,13,.55)}
+.cvmsg .r{color:var(--acc2);font-weight:700;margin-right:6px}
+.cvmsg.sys .r{color:var(--warn)} .cvmsg.asst .r{color:var(--acc)}
 .flow.casc,.linklbl.casc{display:none}
 .cascade .flow.casc{display:inline;stroke:#c792ea;stroke-dasharray:5 5}
 .cascade .linklbl.casc{display:inline;fill:#c792ea}
-.cascade .flow.a2l{opacity:.22}
+.cascade .flow.a2l{display:none}
+.flow.onlycasc{display:none}
+.cascade .flow.onlycasc{display:inline}
+.cascade .flow.notcasc{display:none}
 .node.talking .nlat{fill:var(--acc)}
 .eqbar{fill:var(--acc);opacity:0;transform-box:fill-box;transform-origin:center bottom}
 .node.talking .eqbar{opacity:1;animation:eq .66s ease-in-out infinite}
@@ -1053,6 +1084,12 @@ label.chk input{padding:0;accent-color:var(--acc)}
     </div>
 
     <div class=card>
+      <h2>Conversation</h2>
+      <div class=hint id=cv_session>no visitor yet</div>
+      <div id=cv_turns></div>
+    </div>
+
+    <div class=card>
       <h2>Prompt presets</h2>
       <div class=prow>
         <select id=preset></select>
@@ -1115,7 +1152,7 @@ const LINKS=[
   {a:'mic',b:'audio_decode',flow:1,lbl:'audio'},
   {a:'cam',b:'llm',top:1,flow:1,img:1,lbl:'image'},
   {a:'audio_decode',b:'llm',flow:1,a2l:1},
-  {a:'audio_decode',b:'asr',flow:1},
+  {a:'audio_decode',b:'asr',flow:1,toasr:1},
   {a:'llm',b:'tts',v:1,flow:1},        // Gemma -> kokoro (down)
   {a:'tts',b:'spk',flow:1},            // kokoro -> Speaker
   {a:'llm',b:'reply',flow:1},          // Gemma -> REPLY text (right)
@@ -1145,13 +1182,14 @@ const LINKS_WS=[
   {a:'vad',b:'smart_turn',v:1,flow:1},
   {a:'smart_turn',b:'reopen_grace',v:1,flow:1},
   {a:'reopen_grace',b:'llm',flow:1,a2l:1},
-  {a:'reopen_grace',b:'asr',flow:1},
+  {a:'reopen_grace',b:'asr',flow:1,toasr:1},
   {a:'llm',b:'tts',v:1,flow:1},
   {a:'tts',b:'spk',flow:1},
   {a:'llm',b:'reply',flow:1},
   {a:'asr',b:'heard',flow:1},
   {a:'asr',b:'llm',casc:1,lbl:'transcript'},
 ];
+const CASC_LANE=430;   // x of the cascade transcript lane, in the gap left of the Gemma/ASR column
 const DIAG={mode:null,nodes:N,gw:['audio_decode','asr','llm','tts']};
 function build(mode){
   const ws=mode==='ws', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
@@ -1177,17 +1215,22 @@ function build(mode){
                   // arrowhead bridges it, so the line meets the arrow's BACK CENTRE.
   LNK.forEach(L=>{
     let ax,ay,bx,by,d;
-    if(L.casc){ax=NODES[L.a].x;ay=cyN(L.a)+14;bx=NODES[L.b].x-GAP;by=NODES[L.b].y+NODES[L.b].h-16;
-      const cx=NODES[L.a].x-30;d=`M${ax} ${ay} C${cx} ${ay}, ${cx} ${by}, ${bx} ${by}`;}
+    if(L.casc){   // ASR upper-left -> lane -> Gemma lower-left (clear of the ASR feed below)
+      const cx=CASC_LANE,r=6; ax=NODES[L.a].x;ay=NODES[L.a].y+16;bx=NODES[L.b].x-GAP;by=NODES[L.b].y+NODES[L.b].h-18;
+      d=`M${ax} ${ay} L${cx+r} ${ay} Q${cx} ${ay} ${cx} ${ay-r} L${cx} ${by+r} Q${cx} ${by} ${cx+r} ${by} L${bx} ${by}`;}
     else if(L.v){ax=cxN(L.a);ay=NODES[L.a].y+NODES[L.a].h;bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} L${bx} ${by}`;}
     else if(L.top){ax=rxN(L.a);ay=cyN(L.a);bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${bx} ${ay}, ${bx} ${by}`;}
     else{ax=rxN(L.a);ay=cyN(L.a);bx=NODES[L.b].x-GAP;by=cyN(L.b);d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${(ax+bx)/2} ${by}, ${bx} ${by}`;}
-    const cls=L.casc?'flow casc':(L.flow?('flow'+(L.img?' img':'')+(L.a2l?' a2l':'')):('link'+(L.arm?' arm':'')));
+    const cls=L.casc?'flow casc':(L.flow?('flow'+(L.img?' img':'')+(L.a2l?' a2l':'')+(L.toasr?' notcasc':'')):('link'+(L.arm?' arm':'')));
     svg.appendChild(E('path',{class:cls,d:d,'marker-end':'url(#arr)'}));
+    if(L.toasr){  // cascade: elbow on its own lane into ASR's lower-left, under the transcript lane
+      const r=6, vx=rxN(L.a)+12, ey=NODES[L.b].y+NODES[L.b].h-22, sx=rxN(L.a), sy=cyN(L.a), ex=NODES[L.b].x-GAP;
+      const de=`M${sx} ${sy} L${vx-r} ${sy} Q${vx} ${sy} ${vx} ${sy+r} L${vx} ${ey-r} Q${vx} ${ey} ${vx+r} ${ey} L${ex} ${ey}`;
+      svg.appendChild(E('path',{class:'flow onlycasc',d:de,'marker-end':'url(#arr)'}));}
     if(L.lbl){let lx=(ax+bx)/2,ly=(ay+by)/2-5,anc='middle';
       if(L.img){lx=ax+(bx-ax)*0.26;ly=ay-7;}
       if(L.v){lx=ax+15;ly=(ay+by)/2+3;anc='start';}
-      if(L.casc){lx=NODES[L.a].x-30;ly=(ay+by)/2;anc='middle';}   // vertical, beside the arrow
+      if(L.casc){lx=CASC_LANE+11;ly=(ay+by)/2;anc='middle';}   // vertical, right of the lane
       const la={class:'linklbl'+(L.casc?' casc':''),'text-anchor':anc,x:lx,y:ly};
       if(L.casc)la.transform=`rotate(-90 ${lx} ${ly})`;
       svg.appendChild(T(L.lbl,la));}
@@ -1404,6 +1447,29 @@ $('calib').onclick=()=>{$('calibst').textContent='calibrating…';
   fetch('/api/calibrate',{method:'POST'}).then(r=>r.json()).then(d=>{
     $('calibst').textContent=d.ok?('floor '+(+d.noise_floor).toFixed(4)+' → thr '+(+d.speech_thresh).toFixed(4)):(d.error||'failed');});};
 loadTune();
+// conversation: the current visitor's turns, each with the prompt Gemma saw
+let cvKey='';
+function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function renderConv(d){
+  const turns=d.turns||[], key=(d.session||'')+'|'+turns.length+'|'+turns.map(t=>(t.reply||'').length+(t.prompt?'p':'')).join(',');
+  if(key===cvKey)return; cvKey=key;
+  $('cv_session').textContent=d.session?('session '+d.session+' · '+turns.length+' turn(s)'):'no visitor yet';
+  const open=new Set([...document.querySelectorAll('#cv_turns details[open]')].map(x=>x.dataset.i));
+  $('cv_turns').innerHTML=turns.map((t,i)=>{
+    const last=t.prompt&&t.prompt.length?t.prompt[t.prompt.length-1].content:'';
+    const visitor=t.heard||(t.phase==='greet'?'(walked up)':t.phase==='goodbye'?'(walking away)':'');
+    const msgs=(t.prompt||[]).map(m=>'<div class="cvmsg '+(m.role==='system'?'sys':m.role==='assistant'?'asst':'')+'"><span class=r>'+esc(m.role)+'</span>'+esc(m.content)+'</div>').join('');
+    return '<div class=cvt><div class=ph>'+esc(t.phase||'turn')+(t.in_progress?' · in progress':'')
+      +(t.total_ms?' · '+fmt(t.total_ms):'')+'</div>'
+      +'<div class=ln><b>visitor</b>'+esc(visitor||'—')+'</div>'
+      +'<div class=ln><b>George</b>'+esc(t.reply||'—')+'</div>'
+      +(t.prompt?'<details data-i="'+i+'"'+(open.has(String(i))?' open':'')+'><summary>what Gemma saw · '+t.prompt.length+' messages</summary>'+msgs+'</details>'
+                :(t.in_progress?'':'<div class=hint style=margin-top:4px>prompt not returned (gateway without debug_prompt)</div>'))
+      +'</div>';}).join('');
+  const box=$('cv_turns'); box.scrollTop=box.scrollHeight;
+}
+function loadConv(){fetch('/api/conversation').then(r=>r.json()).then(renderConv).catch(()=>{});}
+loadConv(); setInterval(loadConv,2000);
 // speaker volume (robot AudioClient Get/SetVolume)
 let volT;
 function showVol(d){ if(d&&d.ok&&d.volume!=null){ if(document.activeElement!==$('vol'))$('vol').value=d.volume; $('volst').textContent=d.volume+'%'; }

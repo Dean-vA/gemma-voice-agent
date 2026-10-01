@@ -558,6 +558,11 @@ def main():
             arm=arm, mode_fn=get_mode)
         presence.start()
         print("[presence] controller ready (press F2 to arm)")
+        # The client restarts with the robot; arm straight away so George greets
+        # visitors after a reboot without anyone opening the control centre.
+        if os.environ.get("PRESENCE_AUTOARM", "0").strip().lower() in ("1", "true", "yes", "on"):
+            presence.enable()
+            print("[presence] auto-armed on startup (PRESENCE_AUTOARM=1)")
     except Exception as e:
         print(f"[presence] unavailable ({e}); running F1 push-to-talk only")
 
