@@ -103,6 +103,7 @@ class _Turn:
     committed: bool = False   # output released; the turn can no longer reopen
     finished: bool = False    # reply complete (or failed)
     sentences: dict = field(default_factory=dict)   # index -> sentence text sent as audio
+    instruction: str = ""                           # the instruction this turn was answered with
     stored_reply: object | None = None              # the assistant Turn in the history
 
 
@@ -222,6 +223,16 @@ class RealtimeSession:
         elif kind == "played":
             self._on_played(msg)
 
+    def _commit(self, turn: _Turn) -> None:
+        """Store the turn. When nothing was transcribed, _hear leaves the
+        instruction as the user's line; it isn't what the visitor said (it can
+        be the barge-in note), so store no text and let the backend use its
+        placeholder instead."""
+        if turn.instruction and turn.state.user_text == turn.instruction:
+            turn.state.user_text = ""
+        turn.stored_reply = self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
+        self._last_reply = turn
+
     def _on_played(self, msg: dict) -> None:
         """The client cut a reply off mid-playback: make the history say only
         what was actually spoken. Gemma writes a reply far faster than it is
@@ -301,8 +312,7 @@ class RealtimeSession:
             # the newer turn always wins.)
             await self._cancel(turn)
             if turn.committed and turn.state.reply:
-                turn.stored_reply = self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
-                self._last_reply = turn
+                self._commit(turn)
             if turn.committed:
                 await self._send("cancelled", {"reason": "barge_in"})
         self._turn = _Turn(start_sample=ev.start_sample)
@@ -369,6 +379,7 @@ class RealtimeSession:
             instruction = self.instruction
             if self._interrupted:
                 instruction = f"{_INTERRUPTED_NOTE} {instruction}".strip()
+            turn.instruction = instruction
 
             async def _pump() -> None:
                 try:
@@ -407,8 +418,7 @@ class RealtimeSession:
                     data["metrics"]["components"].append({"name": "reopen_grace", "ms": round(held_ms, 2)})
                     if first_audio_ms is not None:
                         data["metrics"]["time_to_first_audio_ms"] = first_audio_ms
-                    turn.stored_reply = self._commit_turn(self._sid(), turn.state, turn.audio, turn.image)
-                    self._last_reply = turn
+                    self._commit(turn)
                     turn.finished = True
                 await self._send(event, data)
             turn.finished = True
