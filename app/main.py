@@ -268,7 +268,10 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     # name from the X-Engine header, so no extra health round-trip is needed.
     metrics = timer.finish(output_tokens=_approx_tokens(reply))
     if commit:
-        if user_note and not state.user_text:
+        # _hear falls back to the instruction when nothing was transcribed; a
+        # user_note says what really happened (e.g. a greeting from silence),
+        # so it wins over that fallback.
+        if user_note and (not state.user_text or state.user_text == instruction):
             state.user_text = user_note
         commit_turn(session_id, state, samples, image_bytes)
     done = {"reply": reply, "metrics": metrics.as_dict()}
