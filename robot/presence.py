@@ -107,6 +107,12 @@ DISARM_SECS = float(os.environ.get("PRESENCE_DISARM_SECS", "2.0"))  # absent -> 
 # on a looser leash (smaller face + longer grace) than the arrival gate uses.
 STAY_FRAC        = float(os.environ.get("PRESENCE_STAY_FRAC", "0.12"))
 CONV_DISARM_SECS = float(os.environ.get("PRESENCE_CONV_DISARM_SECS", "5.0"))
+# Speech keeps a streamed conversation alive only while SOMEONE is still in front
+# of the robot: a face at least NEAR_FRAC wide seen within FACE_GRACE_SECS. Speech
+# alone isn't enough: in a busy hall there is always speech, and George went on
+# talking to bystanders after the visitor had walked off.
+NEAR_FRAC        = float(os.environ.get("PRESENCE_NEAR_FRAC", "0.08"))
+FACE_GRACE_SECS  = float(os.environ.get("PRESENCE_FACE_GRACE_SECS", "5.0"))
 DEBUG       = os.environ.get("PRESENCE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 # --- Hands-free VAD capture --------------------------------------------------
@@ -1444,17 +1450,25 @@ class PresenceController(threading.Thread):
         watching = threading.Event()
         watching.set()
 
+        last_face = [time.time()]                  # someone (any near face) was in view
+
         def watch():
             while watching.is_set():
                 try:
-                    # A turn in progress counts as presence: someone talking to
-                    # George, or George replying, is not a visitor who walked off
-                    # (the face can drop below the gate while they talk).
+                    now = time.time()
+                    frac = self.detector.nearest_face_frac()
+                    if frac >= NEAR_FRAC:
+                        last_face[0] = now
+                    # A turn in progress counts as presence (the visitor's face can
+                    # drop below the stay gate while they talk, or George is still
+                    # replying), but only while someone is actually there: crowd
+                    # speech with nobody in front must not keep it going.
                     talking = (session.player.active
-                               or time.time() - session.last_activity < CONV_DISARM_SECS)
-                    if talking or self._present_now(STAY_FRAC):
-                        self.last_seen = time.time()
-                    elif (time.time() - self.last_seen) >= CONV_DISARM_SECS:
+                               or now - session.last_activity < CONV_DISARM_SECS)
+                    someone = now - last_face[0] < FACE_GRACE_SECS
+                    if frac >= STAY_FRAC or (talking and someone):
+                        self.last_seen = now
+                    elif (now - self.last_seen) >= CONV_DISARM_SECS:
                         left.set()
                         return
                 except Exception as e:
