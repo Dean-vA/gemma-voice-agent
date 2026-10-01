@@ -214,6 +214,13 @@ STREAM = {
     # echo arrives ~0.4 s after he starts, before the canceller has adapted, and
     # interrupted him at 8-28% of his first sentence. Visitors don't barge in that fast.
     "barge_holdoff_ms": float(os.environ.get("PRESENCE_BARGE_HOLDOFF_MS", "1000")),
+    # Near-field gate for barge-in: while George speaks, only sound clearly louder
+    # than the room (the visitor up close, not crowd chatter a few metres away)
+    # reaches the gateway. Threshold = background level x barge_gate_mult, never
+    # below barge_gate_min (frame RMS after mic gain + echo cancellation).
+    "barge_gate": os.environ.get("PRESENCE_BARGE_GATE", "1").strip().lower() in ("1", "true", "yes", "on"),
+    "barge_gate_mult": float(os.environ.get("PRESENCE_BARGE_GATE_MULT", "3.0")),
+    "barge_gate_min": float(os.environ.get("PRESENCE_BARGE_GATE_MIN", "0.02")),
     # overrides of the gateway's turn-detection settings for this robot's
     # connection (see VAD_OPTIONS in app/realtime.py); empty = gateway defaults
     "vad": {},

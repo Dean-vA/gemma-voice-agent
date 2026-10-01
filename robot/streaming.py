@@ -260,6 +260,13 @@ class StreamSession:
         self.url, self.session_id, self.opts = url, session_id, opts
         self.on_prompt = on_prompt        # (prompt, reply) -> None, e.g. a log line
         self._play_t0 = None               # when the current reply started playing
+        # near-field barge-in gate: background level while George is silent, and
+        # the gate's open/hangover state while he speaks
+        self._ambient = []                 # frame RMS, last ~10 s with George silent
+        self._loud_run = 0                 # consecutive frames above the gate
+        self._gate_open_until = 0.0
+        self._gate_peak = 0.0              # loudest frame since the gate opened (for the log)
+        self._gate_logged = False
         self.mic, self.pub = mic, (pub or (lambda *a, **k: None))
         self.grab_image, self.set_led = grab_image, (set_led or (lambda *a: None))
         # echo_delay_ms: the speaker delay measured in an earlier session, if any
@@ -388,6 +395,42 @@ class StreamSession:
         self.player.flush()
         if self._aec is not None:
             self._aec.flush_far()
+
+    # ---- near-field barge-in gate -------------------------------------------
+    def _near_field_gate(self, frame: np.ndarray, o: dict) -> np.ndarray:
+        """While George speaks, pass the mic only when it is clearly louder than
+        the room: the visitor talking up close, not a crowd a few metres away
+        (on the array the visitor is several times louder). Opens after 4 loud
+        frames (120 ms) and stays open 0.5 s after the last one, so a sentence
+        isn't chopped. When George is silent everything passes, and the frames
+        update the background level."""
+        f = frame.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(f * f)))
+        now = time.time()
+        if self._play_t0 is None:                          # George silent: learn the room
+            self._ambient.append(rms)
+            if len(self._ambient) > 333:                   # ~10 s of 30 ms frames
+                del self._ambient[: len(self._ambient) - 333]
+            self._loud_run, self._gate_open_until, self._gate_logged = 0, 0.0, False
+            return frame
+        background = float(np.median(self._ambient)) if len(self._ambient) >= 30 else 0.0
+        thresh = max(float(o.get("barge_gate_min", 0.02)), background * float(o.get("barge_gate_mult", 3.0)))
+        self.status["barge_gate"] = {"background": round(background, 4), "threshold": round(thresh, 4)}
+        if rms > thresh:
+            self._loud_run += 1
+            self._gate_peak = max(self._gate_peak, rms) if self._loud_run > 1 else rms
+            if self._loud_run >= 4:
+                self._gate_open_until = now + 0.5
+                if not self._gate_logged:
+                    self._gate_logged = True
+                    print(f"[stream] barge gate open: level {self._gate_peak:.3f} > {thresh:.3f} "
+                          f"(background {background:.3f} x{float(o.get('barge_gate_mult', 3.0)):g})")
+        else:
+            self._loud_run = 0
+        if now < self._gate_open_until:
+            return frame
+        self._gate_logged = False
+        return np.zeros_like(frame)
 
     # ---- speaker delay estimate ---------------------------------------------
     def _track_delay(self, frame: np.ndarray) -> None:
@@ -536,9 +579,12 @@ class StreamSession:
                 self._track_delay(frame)
                 if self._aec is not None:
                     frame = self._aec.process(frame)      # keeps adapting during the hold-off
-                hold = float(self.opts().get("barge_holdoff_ms", 0) or 0)
+                o = self.opts()
+                hold = float(o.get("barge_holdoff_ms", 0) or 0)
                 if hold and self._play_t0 is not None and (time.time() - self._play_t0) * 1000.0 < hold:
                     frame = np.zeros_like(frame)          # reply just started: no echo barge-in
+                elif o.get("barge_gate"):
+                    frame = self._near_field_gate(frame, o)
                 if n % 3 == 0:
                     f = frame.astype(np.float32) / 32768.0
                     self.pub("vad", level=round(float(np.sqrt(np.mean(f * f))), 4), active=True)
