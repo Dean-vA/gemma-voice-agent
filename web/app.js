@@ -638,28 +638,41 @@ async function latRun() {
   if (!latClips.length) { latRender(); return; }
   const runs = Number($("lat-runs").value), configs = latShown = latConfigs();
   for (const c of latClips) delete latResults[c.id];
-  latRunning = true; $("lat-run").textContent = "■ Stop"; $("lat-asr").disabled = true;
+  latRunning = true; $("lat-run").textContent = "■ Stop"; $("lat-asr").disabled = $("lat-order").disabled = true;
   try {
     const blobs = {};
     const blobOf = async (id) => blobs[id] || (blobs[id] = await (await fetch(`/eval/asr/clips/${id}.wav`)).blob());
     $("lat-status").textContent = "warming up…";
     for (const cfg of configs) await converseOnce(await blobOf(latClips[0].id), cfg).catch(() => {});
-    // One configuration at a time through every clip, like a live session that
-    // stays in one mode, rather than switching pipeline on every request.
     for (const c of latClips) latResults[c.id] = Object.fromEntries(configs.map((cfg) => [cfg.key, []]));
-    for (const cfg of configs) {
-      for (let i = 0; i < latClips.length && latRunning; i++) {
-        const clip = latClips[i], entry = latResults[clip.id];
-        for (let r = 0; r < runs && latRunning; r++) {
-          $("lat-status").textContent = `${cfg.label} · clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs}`;
-          try { entry[cfg.key].push(await converseOnce(await blobOf(clip.id), cfg)); }
-          catch (e) { entry.error = `${cfg.label}: ${e.message || e}`; }
+    const one = async (cfg, i, r) => {
+      const clip = latClips[i], entry = latResults[clip.id];
+      $("lat-status").textContent = `${cfg.label} · clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs}`;
+      try { entry[cfg.key].push(await converseOnce(await blobOf(clip.id), cfg)); }
+      catch (e) { entry.error = `${cfg.label}: ${e.message || e}`; }
+    };
+    if ($("lat-order").value === "grouped") {
+      // One configuration at a time through every clip, like a live session
+      // that stays in one mode.
+      for (const cfg of configs) {
+        for (let i = 0; i < latClips.length && latRunning; i++) {
+          for (let r = 0; r < runs && latRunning; r++) await one(cfg, i, r);
+          latRender();
         }
-        latRender();
+      }
+    } else {
+      // Each clip through every configuration before moving on, rotating which
+      // goes first so none always follows a warm one.
+      for (let i = 0; i < latClips.length && latRunning; i++) {
+        for (let r = 0; r < runs && latRunning; r++) {
+          const k = (i + r) % configs.length;
+          for (const cfg of [...configs.slice(k), ...configs.slice(0, k)]) if (latRunning) await one(cfg, i, r);
+          latRender();
+        }
       }
     }
     $("lat-status").textContent = latRunning ? "done" : "stopped";
-  } finally { latRunning = false; $("lat-run").textContent = "▶ Run"; $("lat-asr").disabled = false; }
+  } finally { latRunning = false; $("lat-run").textContent = "▶ Run"; $("lat-asr").disabled = $("lat-order").disabled = false; }
 }
 
 function latRender() {
