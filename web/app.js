@@ -644,13 +644,14 @@ async function latRun() {
     const blobOf = async (id) => blobs[id] || (blobs[id] = await (await fetch(`/eval/asr/clips/${id}.wav`)).blob());
     $("lat-status").textContent = "warming up…";
     for (const cfg of configs) await converseOnce(await blobOf(latClips[0].id), cfg).catch(() => {});
-    for (let i = 0; i < latClips.length && latRunning; i++) {
-      const clip = latClips[i], entry = latResults[clip.id] = Object.fromEntries(configs.map((c) => [c.key, []]));
-      for (let r = 0; r < runs && latRunning; r++) {
-        // Rotate which configuration goes first so none always follows a warm one.
-        const k = (i + r) % configs.length, order = [...configs.slice(k), ...configs.slice(0, k)];
-        for (const cfg of order) {
-          $("lat-status").textContent = `clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs} · ${cfg.label}`;
+    // One configuration at a time through every clip, like a live session that
+    // stays in one mode, rather than switching pipeline on every request.
+    for (const c of latClips) latResults[c.id] = Object.fromEntries(configs.map((cfg) => [cfg.key, []]));
+    for (const cfg of configs) {
+      for (let i = 0; i < latClips.length && latRunning; i++) {
+        const clip = latClips[i], entry = latResults[clip.id];
+        for (let r = 0; r < runs && latRunning; r++) {
+          $("lat-status").textContent = `${cfg.label} · clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs}`;
           try { entry[cfg.key].push(await converseOnce(await blobOf(clip.id), cfg)); }
           catch (e) { entry.error = `${cfg.label}: ${e.message || e}`; }
         }
@@ -672,7 +673,7 @@ function latRender() {
     return;
   }
   $("lat-rows").innerHTML = latClips.map((c) => {
-    const r = latResults[c.id];
+    const r = latResults[c.id] && configs.some((cfg) => (latResults[c.id][cfg.key] || []).length) ? latResults[c.id] : null;
     const med = configs.map((cfg) => (r && r[cfg.key] ? latMedian(r[cfg.key].map((x) => x.first)) : null));
     // Every cascade column also shows its gap to hearing the audio directly.
     const cells = configs.map((cfg, i) => {

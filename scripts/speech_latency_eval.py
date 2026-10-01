@@ -88,6 +88,9 @@ def main() -> None:
     ap.add_argument("--engine", default="", help="TTS engine (default: the gateway's)")
     ap.add_argument("--asr-engines", nargs="+", metavar="ENGINE",
                     help="transcript engines for the cascade: parakeet and/or gemma (default: every loaded one)")
+    ap.add_argument("--order", choices=["grouped", "interleaved"], default="grouped",
+                    help="grouped: every clip through one configuration, then the next (default); "
+                         "interleaved: each clip through all configurations before moving on")
     ap.add_argument("--runs", type=int, default=1, help="runs per clip per configuration (repeats hit the prompt cache)")
     ap.add_argument("--out", help="CSV path (default: <dir>/speech_latency.csv)")
     args = ap.parse_args()
@@ -113,16 +116,28 @@ def main() -> None:
         converse(args.host, folder / clips[0][1]["file"], cfg, args.engine)
 
     rows: list[dict] = []
-    for i, (cid, clip) in enumerate(clips):
-        for run in range(args.runs):
-            # Rotate which configuration goes first so none always follows a warm one.
-            k = (i + run) % len(CONFIGS)
-            for cfg in CONFIGS[k:] + CONFIGS[:k]:
-                res = converse(args.host, folder / clip["file"], cfg, args.engine)
-                rows.append({"config": cfg, "clip": cid, "run": run + 1,
-                             "audio_seconds": clip["audio_seconds"], **res})
-        mine = {cfg: [r["first_speech_ms"] for r in rows if r["clip"] == cid and r["config"] == cfg] for cfg in CONFIGS}
-        print(f"  {cid:<8} " + "   ".join(f"{cfg} {pct(mine[cfg], .5):5.0f} ms" for cfg in CONFIGS))
+
+    def one(cfg: str, cid: str, clip: dict, run: int) -> None:
+        res = converse(args.host, folder / clip["file"], cfg, args.engine)
+        rows.append({"config": cfg, "clip": cid, "run": run + 1, "audio_seconds": clip["audio_seconds"], **res})
+
+    if args.order == "grouped":
+        # One configuration at a time, like a live session that stays in one mode.
+        for cfg in CONFIGS:
+            for cid, clip in clips:
+                for run in range(args.runs):
+                    one(cfg, cid, clip, run)
+            mine = [r["first_speech_ms"] for r in rows if r["config"] == cfg]
+            print(f"  {cfg:<20} done: p50 {pct(mine, .5):5.0f} ms over {len(mine)} runs")
+    else:
+        for i, (cid, clip) in enumerate(clips):
+            for run in range(args.runs):
+                # Rotate which configuration goes first so none always follows a warm one.
+                k = (i + run) % len(CONFIGS)
+                for cfg in CONFIGS[k:] + CONFIGS[:k]:
+                    one(cfg, cid, clip, run)
+            mine = {cfg: [r["first_speech_ms"] for r in rows if r["clip"] == cid and r["config"] == cfg] for cfg in CONFIGS}
+            print(f"  {cid:<8} " + "   ".join(f"{cfg} {pct(mine[cfg], .5):5.0f} ms" for cfg in CONFIGS))
 
     out = Path(args.out) if args.out else folder / "speech_latency.csv"
     with open(out, "w", newline="", encoding="utf-8") as fh:
