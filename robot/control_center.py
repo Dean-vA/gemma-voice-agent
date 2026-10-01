@@ -831,6 +831,11 @@ button.primary.on{background:linear-gradient(90deg,var(--acc),#2bb87c);color:#04
 .flowing .flow{stroke:var(--acc);stroke-dasharray:6 8;animation:dash .5s linear infinite}
 @keyframes dash{to{stroke-dashoffset:-14}}
 .node.talking .nbox{stroke:var(--acc);filter:url(#glow)}
+.node.cut .nbox{stroke:var(--warn)}
+.flow.casc,.linklbl.casc{display:none}
+.cascade .flow.casc{display:inline;stroke:#c792ea;stroke-dasharray:5 5}
+.cascade .linklbl.casc{display:inline;fill:#c792ea}
+.cascade .flow.a2l{opacity:.22}
 .node.talking .nlat{fill:var(--acc)}
 .eqbar{fill:var(--acc);opacity:0;transform-box:fill-box;transform-origin:center bottom}
 .node.talking .eqbar{opacity:1;animation:eq .66s ease-in-out infinite}
@@ -1080,15 +1085,51 @@ const LINKS=[
   {a:'detector',b:'mic',v:1,arm:1,lbl:'arm'},
   {a:'mic',b:'audio_decode',flow:1,lbl:'audio'},
   {a:'cam',b:'llm',top:1,flow:1,img:1,lbl:'image'},
-  {a:'audio_decode',b:'llm',flow:1},
+  {a:'audio_decode',b:'llm',flow:1,a2l:1},
   {a:'audio_decode',b:'asr',flow:1},
   {a:'llm',b:'tts',v:1,flow:1},        // Gemma -> kokoro (down)
   {a:'tts',b:'spk',flow:1},            // kokoro -> Speaker
   {a:'llm',b:'reply',flow:1},          // Gemma -> REPLY text (right)
   {a:'asr',b:'heard',flow:1},          // ASR -> HEARD transcript (right)
+  {a:'asr',b:'llm',casc:1,lbl:'transcript'},  // cascade: Gemma answers from the transcript
 ];
-(function build(){
-  const svg=$('diagram');
+// Streamed (WebSocket) mode: the mic is open and streamed, the robot cancels its
+// own voice (AEC), and the GATEWAY decides when a turn ends: Silero VAD (endpoint)
+// -> Smart Turn (is the visitor done?) -> hold (reopen grace, the reply is drafted
+// meanwhile) -> Gemma / ASR. Same canvas, decode swapped for those three stages.
+const N_WS=Object.assign({},N,{
+  mic:{...N.mic,l:'Mic · open',sub:'AEC',
+    desc:"Mic, open — in streamed mode the mic is never cut into clips on the robot: every 30 ms frame goes to the gateway over a WebSocket. Echo cancellation (AEC, WebRTC) removes George's own voice first, so he can be interrupted without hearing himself. The number is the measured speaker delay the canceller works with."},
+  vad:{l:'VAD',x:296,y:96,w:112,h:74,bar:1,sub:'silero · end',
+    desc:"VAD — the gateway's Silero voice-activity detector finds where the visitor's speech starts and stops. The time is the endpoint: how long it waited in silence before closing the segment."},
+  smart_turn:{l:'Smart Turn',x:296,y:190,w:112,h:74,bar:1,sub:'turn done?',
+    desc:"Smart Turn — a small model listens to the end of the segment and judges whether the visitor has finished (a complete turn) or only paused. Shows its inference time and probability; an unfinished turn makes the gateway wait longer before replying."},
+  reopen_grace:{l:'hold',x:296,y:284,w:112,h:74,bar:1,sub:'reopen grace',
+    desc:"Hold — the reopen grace: the reply is held back briefly in case the visitor carries on talking. Gemma is already drafting the reply during the hold, so this overlaps the LLM time rather than adding to it."},
+});
+delete N_WS.audio_decode;
+const LINKS_WS=[
+  {a:'cam',b:'detector',v:1},
+  {a:'detector',b:'mic',v:1,arm:1,lbl:'arm'},
+  {a:'mic',b:'vad',flow:1,lbl:'stream'},
+  {a:'cam',b:'llm',top:1,flow:1,img:1,lbl:'image'},
+  {a:'vad',b:'smart_turn',v:1,flow:1},
+  {a:'smart_turn',b:'reopen_grace',v:1,flow:1},
+  {a:'reopen_grace',b:'llm',flow:1,a2l:1},
+  {a:'reopen_grace',b:'asr',flow:1},
+  {a:'llm',b:'tts',v:1,flow:1},
+  {a:'tts',b:'spk',flow:1},
+  {a:'llm',b:'reply',flow:1},
+  {a:'asr',b:'heard',flow:1},
+  {a:'asr',b:'llm',casc:1,lbl:'transcript'},
+];
+const DIAG={mode:null,nodes:N,gw:['audio_decode','asr','llm','tts']};
+function build(mode){
+  const ws=mode==='ws', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
+  DIAG.mode=mode; DIAG.nodes=NODES;
+  DIAG.gw=ws?['vad','smart_turn','reopen_grace','asr','llm','tts']:['audio_decode','asr','llm','tts'];
+  const cyN=n=>NODES[n].y+NODES[n].h/2, rxN=n=>NODES[n].x+NODES[n].w, cxN=n=>NODES[n].x+NODES[n].w/2;
+  const svg=$('diagram'); while(svg.firstChild)svg.removeChild(svg.firstChild);
   svg.appendChild(E('defs',{},[
     E('linearGradient',{id:'ng',x1:0,y1:0,x2:0,y2:1},[E('stop',{offset:0,'stop-color':'#1d2738'}),E('stop',{offset:1,'stop-color':'#121925'})]),
     E('linearGradient',{id:'bg2',x1:0,y1:0,x2:1,y2:0},[E('stop',{offset:0,'stop-color':'#6ea8ff'}),E('stop',{offset:1,'stop-color':'#3ddc97'})]),
@@ -1096,25 +1137,33 @@ const LINKS=[
     E('marker',{id:'arr',viewBox:'0 0 12 12',refX:0,refY:6,markerWidth:12,markerHeight:12,markerUnits:'userSpaceOnUse',orient:'auto'},[E('path',{d:'M0 0 L12 6 L0 12 z',fill:'rgba(233,238,245,.6)'})])
   ]));
   svg.appendChild(E('rect',{class:'gwbox',x:284,y:86,width:336,height:300,rx:16}));
-  svg.appendChild(T('GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
-  const gtot=T('round-trip Σ —',{class:'gwtotal',id:'gw_total',x:1042,y:404,'text-anchor':'end'});
-  const gtt=document.createElementNS(SVGNS,'title');gtt.textContent='Aggregated gateway round-trip: sum of decode + ASR + LLM + TTS for this turn.';gtot.appendChild(gtt);
+  svg.appendChild(T(ws?'GATEWAY · /ws/converse · Silero VAD + Smart Turn · Gemma 4 E4B':'GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
+  const gtot=T(ws?'stop talking → first audio —':'round-trip Σ —',{class:'gwtotal',id:'gw_total',x:1042,y:404,'text-anchor':'end'});
+  const gtt=document.createElementNS(SVGNS,'title');
+  gtt.textContent=ws?'From the visitor going quiet to the first reply audio: the VAD endpoint wait + the gateway time to first audio (Smart Turn, the hold and Gemma overlap, so the stages are not simply added).'
+                    :'Aggregated gateway round-trip: sum of decode + ASR + LLM + TTS for this turn.';
+  gtot.appendChild(gtt);
   svg.appendChild(gtot);
   const GAP=12;   // line stops this far before the node; the base-anchored 12-long
                   // arrowhead bridges it, so the line meets the arrow's BACK CENTRE.
-  LINKS.forEach(L=>{
+  LNK.forEach(L=>{
     let ax,ay,bx,by,d;
-    if(L.v){ax=cxN(L.a);ay=N[L.a].y+N[L.a].h;bx=cxN(L.b);by=N[L.b].y-GAP;d=`M${ax} ${ay} L${bx} ${by}`;}
-    else if(L.top){ax=rxN(L.a);ay=cyN(L.a);bx=cxN(L.b);by=N[L.b].y-GAP;d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${bx} ${ay}, ${bx} ${by}`;}
-    else{ax=rxN(L.a);ay=cyN(L.a);bx=N[L.b].x-GAP;by=cyN(L.b);d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${(ax+bx)/2} ${by}, ${bx} ${by}`;}
-    const cls=L.flow?('flow'+(L.img?' img':'')):('link'+(L.arm?' arm':''));
+    if(L.casc){ax=NODES[L.a].x;ay=cyN(L.a)+14;bx=NODES[L.b].x-GAP;by=NODES[L.b].y+NODES[L.b].h-16;
+      const cx=NODES[L.a].x-30;d=`M${ax} ${ay} C${cx} ${ay}, ${cx} ${by}, ${bx} ${by}`;}
+    else if(L.v){ax=cxN(L.a);ay=NODES[L.a].y+NODES[L.a].h;bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} L${bx} ${by}`;}
+    else if(L.top){ax=rxN(L.a);ay=cyN(L.a);bx=cxN(L.b);by=NODES[L.b].y-GAP;d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${bx} ${ay}, ${bx} ${by}`;}
+    else{ax=rxN(L.a);ay=cyN(L.a);bx=NODES[L.b].x-GAP;by=cyN(L.b);d=`M${ax} ${ay} C${(ax+bx)/2} ${ay}, ${(ax+bx)/2} ${by}, ${bx} ${by}`;}
+    const cls=L.casc?'flow casc':(L.flow?('flow'+(L.img?' img':'')+(L.a2l?' a2l':'')):('link'+(L.arm?' arm':'')));
     svg.appendChild(E('path',{class:cls,d:d,'marker-end':'url(#arr)'}));
     if(L.lbl){let lx=(ax+bx)/2,ly=(ay+by)/2-5,anc='middle';
       if(L.img){lx=ax+(bx-ax)*0.26;ly=ay-7;}
       if(L.v){lx=ax+15;ly=(ay+by)/2+3;anc='start';}
-      svg.appendChild(T(L.lbl,{class:'linklbl','text-anchor':anc,x:lx,y:ly}));}
+      if(L.casc){lx=NODES[L.a].x-30;ly=(ay+by)/2;anc='middle';}   // vertical, beside the arrow
+      const la={class:'linklbl'+(L.casc?' casc':''),'text-anchor':anc,x:lx,y:ly};
+      if(L.casc)la.transform=`rotate(-90 ${lx} ${ly})`;
+      svg.appendChild(T(L.lbl,la));}
   });
-  for(const k in N){const n=N[k];
+  for(const k in NODES){const n=NODES[k];
     const g=E('g',{class:'node'+(n.fo?' fonode':''),id:'n_'+k,transform:`translate(${n.x},${n.y})`});
     if(n.desc){const ti=document.createElementNS(SVGNS,'title');ti.textContent=n.desc;g.appendChild(ti);}
     if(n.fo){
@@ -1132,9 +1181,11 @@ const LINKS=[
     if(k==='spk'){for(let i=0;i<4;i++)g.appendChild(E('rect',{class:'eqbar',x:n.w/2-18+i*10,y:n.h-26,width:6,height:12,rx:2}));}
     svg.appendChild(g);
   }
-})();
+}
+build('http');
 function node(key,label){const e=$('lat_'+key); if(e)e.textContent=label;}
-function bar(key,frac){const b=$('bar_'+key),n=N[key]; if(b&&n)b.setAttribute('width',Math.max(0,Math.min(1,frac))*(n.w-24));}
+function bar(key,frac){const b=$('bar_'+key),n=DIAG.nodes[key]; if(b&&n)b.setAttribute('width',Math.max(0,Math.min(1,frac))*(n.w-24));}
+function subt(key,txt){const e=$('sub_'+key); if(e)e.textContent=txt;}
 function active(key,on){const g=$('n_'+key); if(g)g.classList.toggle('active',on);}
 
 const es=new EventSource('/state');
@@ -1150,7 +1201,7 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
   $('facebar').style.background=(p.face_frac>=p.thr&&p.thr>0)?'linear-gradient(90deg,#3ddc97,#2bb87c)':'linear-gradient(90deg,#6ea8ff,#3ddc97)';
   $('arm').classList.toggle('on',!!p.enabled);
   $('diagram').classList.toggle('flowing',!!s.in_progress);
-  ['audio_decode','asr','llm','tts'].forEach(k=>active(k,!!s.in_progress));
+  DIAG.gw.forEach(k=>active(k,!!s.in_progress));
   const sp=$('n_spk'); if(sp)sp.classList.toggle('talking',!!s.speaking);
 
   // robot VAD meter (server-pushed; works over plain http unlike the browser mic)
@@ -1167,18 +1218,43 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
 
   const t=s.turn||{},m=t.metrics||{},h=t.hops||{},comp={};
   (m.components||[]).forEach(c=>comp[c.name]=c.ms);
+  if(comp.endpoint!=null)comp.vad=comp.endpoint;     // streamed: VAD node = endpoint wait
   // which ASR engine ran, and whether Gemma answered from the audio or the transcript
   const asrc=(m.components||[]).find(c=>c.name==='asr'), sa=$('sub_asr'), sl=$('sub_llm');
-  if(sa)sa.textContent=asrc&&asrc.engine?asrc.engine:'transcript';
-  if(sl)sl.textContent=m.llm_input==='transcript'?'reads transcript + sees':'reason + see';
+  const gwi=$('gw_input'), gwh=$('gw_heard');
+  const casc=(m.llm_input||(gwi&&gwi.value)||'audio')==='transcript';
+  const heardSel=gwh?gwh.value:'';
+  const eng=(asrc&&asrc.engine)||(casc?'parakeet':(heardSel&&heardSel!=='off'?heardSel:''));
+  $('diagram').classList.toggle('cascade',casc);
+  if(sa)sa.textContent=eng?(eng+(casc?' · feeds Gemma':' · display only')):'off';
+  if(sl)sl.textContent=casc?'reads transcript + sees':'reason + see';
   const secs=v=>(v==null)?'—':(+v).toFixed(1)+'s';
   node('cam','live'); node('detector','n='+(p.nfaces||0));
-  node('mic',secs(m.audio_seconds));
-  const gw=['audio_decode','asr','llm','tts'];
+  const gw=DIAG.gw, ws=DIAG.mode==='ws';
   const mx=Math.max(1,...gw.map(k=>comp[k]||0));
   gw.forEach(k=>{node(k,fmt(comp[k])); bar(k,(comp[k]||0)/mx);});
-  const gwsum=gw.reduce((a,k)=>a+(comp[k]||0),0);
-  const gt=$('gw_total'); if(gt)gt.textContent='round-trip Σ '+(gwsum>0?fmt(gwsum):'—');
+  const gt=$('gw_total'), spn=$('n_spk');
+  if(ws){
+    // streamed: endpoint wait + gateway time to first audio (the stages overlap)
+    const ep=comp.endpoint, vadc=(m.components||[]).find(c=>c.name==='endpoint');
+    const stc=(m.components||[]).find(c=>c.name==='smart_turn');
+    subt('smart_turn',stc?((stc.complete?'done ':'unfinished ')+(stc.probability!=null?'p='+(+stc.probability).toFixed(2):'')):'turn done?');
+    if(!vadc)subt('vad','silero · end');
+    const tfa=m.time_to_first_audio_ms;
+    if(gt)gt.textContent='stop talking → first audio '+(tfa!=null?fmt((ep||0)+tfa):'—');
+    const st=(ST&&ST.status)||{}, o=(ST&&ST.options)||{};
+    const dly=st.echo_delay_ms!=null?st.echo_delay_ms:(ST&&ST.echo_delay_ms);
+    node('mic',dly!=null?Math.round(dly)+'ms':secs(m.audio_seconds));
+    subt('mic',!o.aec?'no AEC':(st.aec&&st.aec.indexOf('on')===0?(st.aec.indexOf('AEC3')>=0?'AEC3 · delay':'AEC · delay'):(ST&&ST.aec_backend?'AEC ready':'AEC missing')));
+    const cut=/ —$/.test(t.reply||'');
+    subt('spk',cut?'barge-in: cut':(st.barge_in?'barge-in on':'half-duplex'));
+    if(spn)spn.classList.toggle('cut',cut);
+  } else {
+    node('mic',secs(m.audio_seconds));
+    const gwsum=gw.reduce((a,k)=>a+(comp[k]||0),0);
+    if(gt)gt.textContent='round-trip Σ '+(gwsum>0?fmt(gwsum):'—');
+    subt('spk','playback'); if(spn)spn.classList.remove('cut');
+  }
   node('spk',secs(m.tts_audio_seconds));
   $('t_total').textContent=fmt(h.total_ms);
   $('t_ttft').textContent=fmt(m.ttft_ms!=null?m.ttft_ms:h.first_token_ms);
@@ -1232,8 +1308,10 @@ const ST_VAD=['vad_threshold','vad_min_speech_ms','vad_min_silence_ms','vad_spee
 // the gateway's stock values, shown until a live session reports what is in effect
 const ST_DEF={vad_threshold:0.6,vad_min_speech_ms:384,vad_min_silence_ms:64,vad_speech_pad_ms:500,reopen_ms:800,
               smart_turn:true,smart_turn_threshold:0.5,smart_turn_max_wait_ms:2000,smart_turn_incomplete_delay_ms:600};
-let stBusy=false;
+let stBusy=false, ST=null;
 function showStream(d){
+  ST=d;                                            // read by the diagram (AEC / barge-in state)
+  if(DIAG.mode!==d.options.transport)build(d.options.transport);   // diagram follows the link
   const o=d.options, gw=(d.status&&d.status.gateway)||{}, s=d.status||{};
   $('st_transport').value=o.transport;
   $('st_ws').style.display=o.transport==='ws'?'':'none';
