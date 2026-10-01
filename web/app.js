@@ -560,22 +560,34 @@ function evalGo(i) {
 }
 
 // ---------- speech latency eval ----------
-// Replays the clips recorded in ASR eval through POST /converse in the two
-// pipeline configurations and compares the time to the first spoken audio:
-//   audio       Gemma answers from the speech itself, then TTS
-//   transcript  Parakeet transcribes, Gemma answers from the text, then TTS
+// Replays the clips recorded in ASR eval through POST /converse and compares
+// the time to the first spoken audio across pipeline configurations:
+//   audio                 Gemma answers from the speech itself, then TTS
+//   transcript · <engine> <engine> transcribes (Parakeet or Gemma), Gemma
+//                         answers from that text, then TTS
 // Times are the gateway's own (request received -> first sentence synthesized),
 // so they exclude upload and playback. The transcript pass that the console
 // shows in "hears audio" mode is switched off here: it would only add delay.
-const LAT_CONFIGS = [["audio", "Hears audio"], ["transcript", "Reads transcript"]];
 let latClips = null;            // [{id, text}] from the gateway
-const latResults = {};          // id -> { audio: [run], transcript: [run] }, run = {first, asr, ttft, tts1}
+let latEngines = ["gemma"];     // ASR engines the gateway has loaded
+let latShown = [];              // configurations of the last (or current) run
+const latResults = {};          // id -> { [config.key]: [run] }, run = {first, asr, ttft, tts1}
 let latRunning = false;
 
-async function converseOnce(blob, llmInput) {
+// The configurations to compare, from the engine picker. An engine that isn't
+// loaded is left out rather than silently replaced by another one.
+function latConfigs() {
+  const pick = $("lat-asr").value;
+  const engines = (pick === "both" ? ["parakeet", "gemma"] : [pick]).filter((e) => latEngines.includes(e));
+  return [{ key: "audio", label: "Hears audio", llm: "audio" },
+          ...engines.map((e) => ({ key: `transcript-${e}`, label: `Reads ${e} transcript`, llm: "transcript", asr: e }))];
+}
+
+async function converseOnce(blob, cfg) {
   const form = new FormData();
   form.append("audio", blob, "clip.wav");
-  form.append("llm_input", llmInput);
+  form.append("llm_input", cfg.llm);
+  if (cfg.asr) form.append("asr_engine", cfg.asr);
   form.append("transcribe", "false");
   form.append("engine", $("tts-select").value || "");
   const resp = await fetch("/converse", { method: "POST", body: form });
@@ -593,6 +605,10 @@ async function converseOnce(blob, llmInput) {
   }
   if (sid) { const f = new FormData(); f.append("session_id", sid); fetch("/reset", { method: "POST", body: f }); }
   if (!metrics || metrics.time_to_first_audio_ms == null) throw new Error("no audio in reply");
+  // Make sure the gateway really ran what this column claims.
+  const asr = (metrics.components || []).find((c) => c.name === "asr");
+  if (cfg.asr && (!asr || asr.engine !== cfg.asr)) throw new Error(`${cfg.asr} did not run (got ${asr ? asr.engine : "no transcript"})`);
+  if (cfg.llm === "transcript" && metrics.llm_input !== "transcript") throw new Error("empty transcript; Gemma heard the audio instead");
   return { first: metrics.time_to_first_audio_ms, asr: metrics.asr_ms || 0, ttft: metrics.ttft_ms,
            tts1: (metrics.tts_segments[0] || {}).client_ms || 0 };
 }
@@ -600,67 +616,93 @@ async function converseOnce(blob, llmInput) {
 const latMedian = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
 const latP95 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.ceil(s.length * 0.95) - 1)] : null; };
 
-async function latLoadClips() {
+async function latLoad() {
   try {
     const manifest = await (await fetch("/eval/asr/clips")).json();
     latClips = Object.entries(manifest).map(([id, c]) => ({ id, text: c.text })).sort((a, b) => a.id.localeCompare(b.id));
   } catch { latClips = []; }
+  try {
+    const data = await (await fetch("/asr/engines")).json();
+    latEngines = data.engines.filter((e) => e.available).map((e) => e.name);
+  } catch { /* keep the last known list */ }
+  for (const o of $("lat-asr").options) {
+    o.disabled = o.value === "both" ? latEngines.length < 2 : !latEngines.includes(o.value);
+  }
+  if ($("lat-asr").selectedOptions[0].disabled) $("lat-asr").value = latEngines[0];
 }
 
 async function latRun() {
   if (latRunning) { latRunning = false; return; }      // the button doubles as Stop
   if (!$("tts-select").value) { $("lat-status").textContent = "No TTS voice is reachable, so there is no speech to time."; return; }
-  await latLoadClips();
+  await latLoad();
   if (!latClips.length) { latRender(); return; }
-  const runs = Number($("lat-runs").value);
+  const runs = Number($("lat-runs").value), configs = latShown = latConfigs();
   for (const c of latClips) delete latResults[c.id];
-  latRunning = true; $("lat-run").textContent = "■ Stop";
+  latRunning = true; $("lat-run").textContent = "■ Stop"; $("lat-asr").disabled = $("lat-order").disabled = true;
   try {
     const blobs = {};
     const blobOf = async (id) => blobs[id] || (blobs[id] = await (await fetch(`/eval/asr/clips/${id}.wav`)).blob());
     $("lat-status").textContent = "warming up…";
-    for (const [cfg] of LAT_CONFIGS) await converseOnce(await blobOf(latClips[0].id), cfg).catch(() => {});
-    for (let i = 0; i < latClips.length && latRunning; i++) {
-      const clip = latClips[i], entry = latResults[clip.id] = { audio: [], transcript: [] };
-      for (let r = 0; r < runs && latRunning; r++) {
-        // Alternate which configuration goes first so neither always benefits from a warm cache.
-        const order = (i + r) % 2 ? [...LAT_CONFIGS].reverse() : LAT_CONFIGS;
-        for (const [cfg] of order) {
-          $("lat-status").textContent = `clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs} · ${cfg}`;
-          try { entry[cfg].push(await converseOnce(await blobOf(clip.id), cfg)); }
-          catch (e) { entry.error = String(e.message || e); }
+    for (const cfg of configs) await converseOnce(await blobOf(latClips[0].id), cfg).catch(() => {});
+    for (const c of latClips) latResults[c.id] = Object.fromEntries(configs.map((cfg) => [cfg.key, []]));
+    const one = async (cfg, i, r) => {
+      const clip = latClips[i], entry = latResults[clip.id];
+      $("lat-status").textContent = `${cfg.label} · clip ${i + 1} / ${latClips.length} · run ${r + 1} / ${runs}`;
+      try { entry[cfg.key].push(await converseOnce(await blobOf(clip.id), cfg)); }
+      catch (e) { entry.error = `${cfg.label}: ${e.message || e}`; }
+    };
+    if ($("lat-order").value === "grouped") {
+      // One configuration at a time through every clip, like a live session
+      // that stays in one mode.
+      for (const cfg of configs) {
+        for (let i = 0; i < latClips.length && latRunning; i++) {
+          for (let r = 0; r < runs && latRunning; r++) await one(cfg, i, r);
+          latRender();
         }
-        latRender();
+      }
+    } else {
+      // Each clip through every configuration before moving on, rotating which
+      // goes first so none always follows a warm one.
+      for (let i = 0; i < latClips.length && latRunning; i++) {
+        for (let r = 0; r < runs && latRunning; r++) {
+          const k = (i + r) % configs.length;
+          for (const cfg of [...configs.slice(k), ...configs.slice(0, k)]) if (latRunning) await one(cfg, i, r);
+          latRender();
+        }
       }
     }
     $("lat-status").textContent = latRunning ? "done" : "stopped";
-  } finally { latRunning = false; $("lat-run").textContent = "▶ Run"; }
+  } finally { latRunning = false; $("lat-run").textContent = "▶ Run"; $("lat-asr").disabled = $("lat-order").disabled = false; }
 }
 
 function latRender() {
-  if (latClips === null) { latLoadClips().then(latRender); return; }
+  if (latClips === null) { latLoad().then(latRender); return; }
   const fmt = (v) => (v == null ? "—" : `${v.toFixed(0)} ms`);
+  const configs = latShown.length ? latShown : latConfigs();
+  $("lat-head").innerHTML = `<tr><th>Clip</th><th>Sentence</th>${configs.map((c) => `<th>${c.label}</th>`).join("")}</tr>`;
   if (!latClips.length) {
-    $("lat-rows").innerHTML = `<tr class="todo"><td colspan="5">No recorded clips yet. Record some in ASR eval first.</td></tr>`;
+    $("lat-rows").innerHTML = `<tr class="todo"><td colspan="${2 + configs.length}">No recorded clips yet. Record some in ASR eval first.</td></tr>`;
     $("lat-summary").innerHTML = "";
     return;
   }
   $("lat-rows").innerHTML = latClips.map((c) => {
-    const r = latResults[c.id];
-    const a = r ? latMedian(r.audio.map((x) => x.first)) : null, t = r ? latMedian(r.transcript.map((x) => x.first)) : null;
-    const diff = a != null && t != null ? t - a : null;
-    const cls = diff == null ? "" : diff < 0 ? "faster" : "slower";
-    return `<tr class="${r ? "" : "todo"}"><td class="id">${c.id}</td><td>${esc(c.text)}${r && r.error ? ` <b>${esc(r.error)}</b>` : ""}</td>`
-         + `<td class="num">${fmt(a)}</td><td class="num">${fmt(t)}</td>`
-         + `<td class="num ${cls}">${diff == null ? "—" : (diff > 0 ? "+" : "") + diff.toFixed(0) + " ms"}</td></tr>`;
+    const r = latResults[c.id] && configs.some((cfg) => (latResults[c.id][cfg.key] || []).length) ? latResults[c.id] : null;
+    const med = configs.map((cfg) => (r && r[cfg.key] ? latMedian(r[cfg.key].map((x) => x.first)) : null));
+    // Every cascade column also shows its gap to hearing the audio directly.
+    const cells = configs.map((cfg, i) => {
+      const diff = i > 0 && med[i] != null && med[0] != null ? med[i] - med[0] : null;
+      const cls = diff == null ? "" : diff < 0 ? "faster" : "slower";
+      return `<td class="num ${cls}">${fmt(med[i])}${diff == null ? "" : ` <small>(${diff > 0 ? "+" : ""}${diff.toFixed(0)})</small>`}</td>`;
+    }).join("");
+    return `<tr class="${r ? "" : "todo"}"><td class="id">${c.id}</td><td>${esc(c.text)}${r && r.error ? ` <b>${esc(r.error)}</b>` : ""}</td>${cells}</tr>`;
   }).join("");
 
-  $("lat-summary").innerHTML = LAT_CONFIGS.map(([cfg, label]) => {
-    const all = Object.values(latResults).flatMap((r) => r[cfg]);
-    if (!all.length) return `<div class="eval-card"><div class="eval-engine">${label}</div><div class="v">— <small>not run yet</small></div></div>`;
+  $("lat-summary").innerHTML = configs.map((cfg) => {
+    const all = Object.values(latResults).flatMap((r) => r[cfg.key] || []);
+    if (!all.length) return `<div class="eval-card"><div class="eval-engine">${cfg.label}</div><div class="v">— <small>not run yet</small></div></div>`;
     const med = (k) => latMedian(all.map((x) => x[k]));
     // ttft is measured from the start of the request, so it already contains the ASR pass.
-    return `<div class="eval-card"><div class="eval-engine">${label} · ${all.length} runs</div>`
+    return `<div class="eval-card"><div class="eval-engine">${cfg.label} · ${all.length} runs</div>`
          + `<div class="v">${med("first").toFixed(0)} <small>ms to first speech (median)</small> &nbsp; ${latP95(all.map((x) => x.first)).toFixed(0)} <small>p95</small></div>`
          + `<div class="parts">asr ${med("asr").toFixed(0)} ms · llm first token ${(med("ttft") - med("asr")).toFixed(0)} ms · first sentence tts ${med("tts1").toFixed(0)} ms</div></div>`;
   }).join("");
@@ -890,6 +932,7 @@ $("mode-chat").addEventListener("click", () => setMode("chat"));
 $("mode-eval").addEventListener("click", () => setMode("asr"));
 $("mode-latency").addEventListener("click", () => setMode("latency"));
 $("lat-run").addEventListener("click", latRun);
+$("lat-asr").addEventListener("change", () => { if (!latRunning) { latShown = []; latRender(); } });
 $("input-select").addEventListener("change", (e) => {
   e.target.dataset.touched = "1";
   // A cascade is only worth it with the fast ASR: switch to Parakeet when it's loaded.
