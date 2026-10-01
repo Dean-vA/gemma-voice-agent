@@ -85,6 +85,20 @@ class VLLMBackend(ChatBackend):
         messages.append({"role": "user", "content": cur})
         return messages
 
+    def describe_prompt(self, system_prompt, history, user_audio, instruction,
+                        user_image=None, user_text=None) -> list[dict]:
+        """The exact messages ``stream`` sends, with audio/images as placeholders."""
+        secs = len(user_audio) / self.settings.sample_rate
+        out = []
+        for m in self._build_messages(system_prompt, history, user_audio, instruction, user_image, user_text):
+            c = m["content"]
+            if isinstance(c, list):
+                c = " ".join(p["text"] if p["type"] == "text" else
+                             "[image]" if p["type"] == "image_url" else f"[audio {secs:.1f}s]"
+                             for p in c)
+            out.append({"role": m["role"], "content": c})
+        return out
+
     async def stream(
         self,
         system_prompt: str,
