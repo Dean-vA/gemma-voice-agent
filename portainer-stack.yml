@@ -18,6 +18,9 @@
 #   SYSTEM_PROMPT     (optional — default persona; overridable per session via POST /persona)
 #   MAX_NEW_TOKENS    (optional)
 #   MAX_HISTORY_TURNS (optional)
+#   VAD_THRESHOLD / VAD_MIN_SPEECH_MS / SMART_TURN / REOPEN_MS / SMART_TURN_MAX_WAIT_MS /
+#   VAD_BARGE_IN      (optional — streamed-loop turn detection; see .env.example)
+#   ASR_ENGINE / PARAKEET (optional — transcript engine: gemma | parakeet)
 #   HISTORY_KEEP_AUDIO_TURNS (optional — -1 keeps all replayed audio [default];
 #                             >=0 drops audio from older transcribed user turns)
 
@@ -100,9 +103,20 @@ services:
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-256}
       - MAX_HISTORY_TURNS=${MAX_HISTORY_TURNS:-8}
       - HISTORY_KEEP_AUDIO_TURNS=${HISTORY_KEEP_AUDIO_TURNS:--1}
+      # Streamed voice loop (/ws/converse) turn detection; see .env.example.
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.6}
+      - VAD_MIN_SPEECH_MS=${VAD_MIN_SPEECH_MS:-384}
+      - SMART_TURN=${SMART_TURN:-true}
+      - REOPEN_MS=${REOPEN_MS:-800}
+      - SMART_TURN_MAX_WAIT_MS=${SMART_TURN_MAX_WAIT_MS:-2000}
+      - VAD_BARGE_IN=${VAD_BARGE_IN:-true}
+      - ASR_ENGINE=${ASR_ENGINE:-gemma}
+      - PARAKEET=${PARAKEET:-true}
+      - LLM_INPUT=${LLM_INPUT:-audio}
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a friendly humanoid robot assistant. Reply in short, natural spoken sentences. Be concise and conversational.}
     volumes:
       - hf-cache:/root/.cache/huggingface
+      - asr-clips:/app/samples   # clips recorded in the console's ASR eval mode survive redeploys
       # NOTE: no ./web bind mount. The UI is baked into the image at /app/web by
       # the Dockerfile (COPY web ./web). A relative bind here would shadow it
       # with an empty dir in a web-editor stack -> /app/web/index.html missing.
@@ -116,3 +130,4 @@ services:
 
 volumes:
   hf-cache:
+  asr-clips:
