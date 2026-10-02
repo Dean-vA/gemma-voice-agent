@@ -130,6 +130,7 @@ def _fast_timing(monkeypatch):
     monkeypatch.setattr(tc, "FADE_SECS", 0.05)
     monkeypatch.setattr(tc, "MIN_MOVE_SECS", 0.05)
     monkeypatch.setattr(tc, "FSM_POLL_SECS", 0.01)
+    monkeypatch.setattr(tc, "STEP_SPEED", 50.0)
 
 
 def _run_daemon(monkeypatch, robot, script):

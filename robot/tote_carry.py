@@ -546,13 +546,14 @@ class _AnySet:
         return any(e.is_set() for e in self._events)
 
 
-def carry(robot, poses, speed, end, step=None, log_every=2.0, step_speed=STEP_SPEED):
+def carry(robot, poses, speed, end, step=None, log_every=2.0, step_speed=None):
     """Take the arms (holding where they are), move the right arm into poses[0]
     and hold. Each time `step` is set, move on to the next pose; a step on the
     last pose (or `end`) lowers the arm and hands the arms back. Steps that
     arrive while the arm is moving are ignored. If `end.fast` is set, skip the
     lowering and drop the weight at once."""
     step = step or threading.Event()
+    step_speed = step_speed or STEP_SPEED
     start = robot.arm_q()
     start_right = start[7:]
     robot.waist_q = robot.waist()       # weight is 0 here -> pure loco command
