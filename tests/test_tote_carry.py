@@ -255,3 +255,12 @@ def test_daemon_releases_on_stop(monkeypatch):
     r = FakeRobot()
     _run_daemon(monkeypatch, r, script)
     assert r.weight == 0.0
+
+
+def test_still_segments_lists_each_held_pose_once():
+    a, b = [0.0] * 7, [1.0] * 7
+    move = [[0.1 * i] * 7 for i in range(1, 10)]
+    samples = [a] * 10 + move + [b] * 10 + [[1.01] * 7] * 5
+    segs = tc.still_segments(samples, 5)
+    assert [i for i, _ in segs] == [0, 19]
+    assert segs[0][1] == pytest.approx(a) and segs[1][1] == pytest.approx(b, abs=0.01)

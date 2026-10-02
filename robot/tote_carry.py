@@ -332,6 +332,28 @@ def still_pose(samples, window, tol=0.02):
     return None
 
 
+def still_segments(samples, window, tol=0.02, distinct=0.05):
+    """Every pose held still for `window` samples, in order, as (start_index,
+    mean pose). Overlapping still windows merge into one segment; a segment is
+    dropped if it is within `distinct` rad of the previous one."""
+    segs, i, n = [], 0, len(samples)
+    while i + window <= n:
+        cols = list(zip(*samples[i:i + window]))
+        if all(max(c) - min(c) <= tol for c in cols):
+            j = i + window                       # grow while it stays still
+            while j < n and all(abs(samples[j][k] - samples[i][k]) <= tol
+                                for k in range(len(samples[i]))):
+                j += 1
+            seg = samples[i:j]
+            pose = [sum(c) / len(c) for c in zip(*seg)]
+            if not segs or max(abs(a - b) for a, b in zip(pose, segs[-1][1])) > distinct:
+                segs.append((i, pose))
+            i = j
+        else:
+            i += 1
+    return segs
+
+
 def record(robot, secs, rate=50):
     """Read-only pose capture: nothing is published."""
     print(f"[record] logging arms for {secs:.0f}s (mode {robot.mode()}) -- move the "
@@ -364,19 +386,31 @@ def teach(robot, start, secs, speed, rate=50):
     start_right = start[7:]
     hold = list(start)
     samples = []
+    marks = []                          # poses captured with F1+F2 during teach
+    try:
+        robot.listen_remote()
+    except Exception as e:
+        print(f"[teach] remote not available ({e}); F1+F2 marking disabled")
     print("[teach] taking the arms (weight 0 -> 1, holding current pose)")
     _run_phase(robot, FADE_SECS, lambda s: (hold, smoothstep(s)), stop)
     try:
         print("[teach] HOLD THE RIGHT ARM -- it goes soft in 1s")
         _run_phase(robot, 1.0, lambda s: (hold, 1.0, 1.0 - smoothstep(s),
                                           KD_ARM + (TEACH_KD - KD_ARM) * s), stop)
-        print(f"[teach] right arm is limp for {secs:.0f}s -- move it into the carry "
-              "pose and hold it still for ~2s", flush=True)
+        print(f"[teach] right arm is limp for {secs:.0f}s -- pose it, then press F1+F2 "
+              "to capture (or hold it still ~2s)", flush=True)
         t_end, n = time.time() + secs, 0
+        prev_keys = robot.keys()
         while not stop.is_set() and time.time() < t_end:
             robot.send(hold, 1.0, 0.0, TEACH_KD)
             q = robot.arm_q()[7:]
             samples.append(q)
+            keys = robot.keys()
+            if combo_edge(prev_keys, keys):
+                marks.append(q)
+                print(f"[teach] MARKED (F1+F2) at {n / rate:.1f}s: {format_pose(q)}",
+                      flush=True)
+            prev_keys = keys
             if n % rate == 0:
                 print(f"[teach] right: {format_pose(q)}", flush=True)
                 print(f"[teach]   {robot.loco_summary()}", flush=True)
@@ -389,11 +423,19 @@ def teach(robot, start, secs, speed, rate=50):
         print("[teach] re-stiffening the arm where it is (1s)")
         _run_phase(robot, 1.0, lambda s: (hold, robot.weight, smoothstep(s),
                                           TEACH_KD + (KD_ARM - TEACH_KD) * s), stop_now)
-        pose = still_pose(samples, 2 * rate) if samples else None
+        for k, q in enumerate(marks):
+            print(f"[teach] MARK {k + 1}: {format_pose(q)}")
+            print("[teach]   --pose " + ",".join(f"{v:.3f}" for v in q))
+        segs = still_segments(samples, int(1.5 * rate)) if samples else []
+        for k, (i, q) in enumerate(segs):
+            print(f"[teach] still #{k + 1} from {i / rate:.1f}s: {format_pose(q)}")
+            print("[teach]   --pose " + ",".join(f"{v:.3f}" for v in q))
+        pose = marks[-1] if marks else (still_pose(samples, 2 * rate) if samples else None)
         if pose is None:
-            print("[teach] arm never held still for 2s -- no pose recorded")
+            print("[teach] no mark and arm never held still for 2s -- no pose recorded")
         else:
-            print(f"[teach] RIGHT POSE: {format_pose(pose)}")
+            print(f"[teach] RIGHT POSE ({'last mark' if marks else 'last still'}): "
+                  f"{format_pose(pose)}")
             print("[teach] --pose " + ",".join(f"{q:.3f}" for q in pose))
         back = move_duration(here, start_right, speed)
         print(f"[teach] returning right arm ({back:.1f}s), then releasing")
