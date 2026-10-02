@@ -143,26 +143,59 @@ def _run_daemon(monkeypatch, robot, script):
         finally:
             stop.set()
     threading.Thread(target=drive, daemon=True).start()
-    tc.daemon(robot, tc.TOTE_POSE, speed=50.0)   # fast moves for the test
+    tc.daemon(robot, tc.TOTE_POSES, speed=50.0)  # fast moves for the test
 
 
-def test_daemon_combo_raises_then_lowers(monkeypatch):
+def test_daemon_cycles_pose1_pose2_then_lowers(monkeypatch):
     seen = {}
 
     def script(r):
         time.sleep(0.1)
-        r.tap(tc.KEY_COMBO)
+        r.tap(tc.KEY_COMBO)                     # off -> pose 1
         time.sleep(0.4)
-        seen["raised_w"] = r.weight
-        seen["raised_r"] = r.frames[-1][0][7:]
-        r.tap(tc.KEY_COMBO)
+        seen["p1"] = (r.weight, r.frames[-1][0][7:])
+        r.tap(tc.KEY_COMBO)                     # pose 1 -> pose 2
+        time.sleep(0.4)
+        seen["p2"] = (r.weight, r.frames[-1][0][7:])
+        r.tap(tc.KEY_COMBO)                     # pose 2 -> lowered, off
         time.sleep(0.6)
     r = FakeRobot()
     _run_daemon(monkeypatch, r, script)
-    assert seen["raised_w"] == 1.0
-    assert seen["raised_r"] == pytest.approx(tc.TOTE_POSE)
+    assert seen["p1"][0] == 1.0 and seen["p1"][1] == pytest.approx(tc.TOTE_POSE)
+    assert seen["p2"][0] == 1.0 and seen["p2"][1] == pytest.approx(tc.TOTE_POSE_2)
     assert r.weight == 0.0
     assert r.frames[-1][0][7:] == pytest.approx(STANDING_RIGHT)   # lowered first
+
+
+def test_daemon_ignores_press_during_move(monkeypatch):
+    seen = {}
+
+    def script(r):
+        time.sleep(0.1)
+        r.tap(tc.KEY_COMBO, secs=0.02)          # off -> pose 1 (move is slow here)
+        time.sleep(0.03)
+        r.tap(tc.KEY_COMBO, secs=0.02)          # mid-move: must not skip to pose 2
+        time.sleep(1.0)
+        seen["after"] = (r.weight, r.frames[-1][0][7:])
+    r = FakeRobot()
+    _fast_timing(monkeypatch)
+    monkeypatch.setattr(tc, "MIN_MOVE_SECS", 0.5)
+    stop = threading.Event()
+    monkeypatch.setattr(tc, "_stop_on_signals", lambda: stop)
+
+    def drive():
+        try:
+            script(r)
+        finally:
+            stop.set()
+    threading.Thread(target=drive, daemon=True).start()
+    tc.daemon(r, tc.TOTE_POSES, speed=50.0)
+    assert seen["after"][0] == 1.0
+    assert seen["after"][1] == pytest.approx(tc.TOTE_POSE)    # still pose 1
+
+
+def test_pose2_is_within_limits():
+    assert tc.clamp_pose(tc.TOTE_POSE_2) == tc.TOTE_POSE_2
 
 
 def test_daemon_ignores_combo_outside_walk_mode(monkeypatch):

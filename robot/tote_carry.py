@@ -33,7 +33,8 @@ script's assumption -- do not run the motion until the pose is corrected.
 Options (all optional):
     --check              read-only: print state + plan, send nothing
     --pose a,b,c,d,e,f,g override right-arm target (rad): shoulder pitch, roll,
-                         yaw, elbow, wrist roll, pitch, yaw
+                         yaw, elbow, wrist roll, pitch, yaw (pose 1 for --daemon)
+    --daemon             always-on: F1+F2 steps off -> pose 1 -> pose 2 -> off
     --kp N / --kd N      shoulder+elbow gains (default 60 / 1.5)
     --speed R            max joint speed for the move, rad/s (default 0.6)
     --hold-secs S        release automatically after S seconds (default: forever)
@@ -72,6 +73,10 @@ LIMIT_MARGIN = 0.1
 # swings it out, +elbow bends it.
 # Recorded by hand with --teach on 2026-10-02 (arm posed for the tote bag).
 TOTE_POSE = [-0.170, -0.061, 0.038, 0.502, 1.071, -0.075, 0.593]
+# Second pose, also taught by hand (2026-10-02). --daemon steps through
+# TOTE_POSES one F1+F2 press at a time, then lowers on the press after the last.
+TOTE_POSE_2 = [0.145, -0.146, 0.285, 1.211, 0.615, 0.013, -0.071]
+TOTE_POSES = [TOTE_POSE, TOTE_POSE_2]
 
 KP_ARM, KD_ARM     = 60.0, 1.5
 KP_WRIST, KD_WRIST = 40.0, 1.5
@@ -440,7 +445,8 @@ def main(argv=None):
     if args.record > 0:
         return record(robot, args.record)
     if args.daemon:
-        return daemon(robot, target_right, args.speed)
+        poses = [target_right] + [clamp_pose(q) for q in TOTE_POSES[1:]]
+        return daemon(robot, poses, args.speed)
 
     start = robot.arm_q()
     robot.waist_q = robot.waist()
@@ -475,7 +481,7 @@ def main(argv=None):
         t = threading.Timer(args.hold_secs, stop.set)
         t.daemon = True
         t.start()
-    carry(robot, target_right, args.speed, stop)
+    carry(robot, [target_right], args.speed, stop)
     return 0
 
 
@@ -486,10 +492,22 @@ def _stop_on_signals():
     return stop
 
 
-def carry(robot, target_right, speed, end, log_every=2.0):
-    """Take the arms (holding where they are), move the right arm into the tote
-    pose, hold until `end` is set, then lower it and hand the arms back.
-    If `end.fast` is set, skip the lowering and drop the weight at once."""
+class _AnySet:
+    """is_set() of several events -- lets _run_phase stop on either."""
+    def __init__(self, *events):
+        self._events = events
+
+    def is_set(self):
+        return any(e.is_set() for e in self._events)
+
+
+def carry(robot, poses, speed, end, step=None, log_every=2.0):
+    """Take the arms (holding where they are), move the right arm into poses[0]
+    and hold. Each time `step` is set, move on to the next pose; a step on the
+    last pose (or `end`) lowers the arm and hands the arms back. Steps that
+    arrive while the arm is moving are ignored. If `end.fast` is set, skip the
+    lowering and drop the weight at once."""
+    step = step or threading.Event()
     start = robot.arm_q()
     start_right = start[7:]
     robot.waist_q = robot.waist()       # weight is 0 here -> pure loco command
@@ -498,21 +516,28 @@ def carry(robot, target_right, speed, end, log_every=2.0):
     print("[tote] taking the arms (weight 0 -> 1, holding current pose)", flush=True)
     took = _run_phase(robot, FADE_SECS, lambda s: (hold, smoothstep(s)), end)
     try:
-        if took:
-            move_secs = move_duration(start_right, target_right, speed)
-            print(f"[tote] moving right arm into tote pose ({move_secs:.1f}s)", flush=True)
+        for i, target in enumerate(poses if took else []):
+            here = list(hold[7:])
+            move_secs = move_duration(here, target, speed)
+            print(f"[tote] moving right arm to pose {i + 1}/{len(poses)} "
+                  f"({move_secs:.1f}s)", flush=True)
 
-            def to_tote(s):
-                hold[7:] = lerp_pose(start_right, target_right, s)
+            def to_pose(s, here=here, target=target):
+                hold[7:] = lerp_pose(here, target, s)
                 return hold, 1.0
-            if _run_phase(robot, move_secs, to_tote, end):
-                print("[tote] holding -- drive with the remote as usual.", flush=True)
-                while not end.is_set():
-                    _run_phase(robot, log_every, lambda s: (hold, 1.0), end)
-                    meas = robot.arm_q()[7:]
-                    err = max(abs(m - t) for m, t in zip(meas, target_right))
-                    print(f"[tote] right meas: {format_pose(meas)}  "
-                          f"(max err {err:.2f} rad)", flush=True)
+            if not _run_phase(robot, move_secs, to_pose, end):
+                break
+            step.clear()                # presses during the move don't count
+            print(f"[tote] holding pose {i + 1} -- drive with the remote as usual.",
+                  flush=True)
+            while not end.is_set() and not step.is_set():
+                _run_phase(robot, log_every, lambda s: (hold, 1.0), _AnySet(end, step))
+                meas = robot.arm_q()[7:]
+                err = max(abs(m - t) for m, t in zip(meas, target))
+                print(f"[tote] right meas: {format_pose(meas)}  "
+                      f"(max err {err:.2f} rad)", flush=True)
+            if end.is_set():
+                break
     finally:
         # Always hand the arms back, even after a stop mid-move or an error.
         stop_now = threading.Event()   # the shutdown path itself is not interruptible
@@ -554,16 +579,18 @@ class _Fsm:
                 self.value = v
 
 
-def daemon(robot, target_right, speed):
-    """Always-on service: F1+F2 on the remote toggles the carry, only in regular
-    walk mode. Publishes nothing while idle. Lowers + releases on the next
-    F1+F2, when the robot leaves walk mode, or on SIGTERM (docker stop);
-    drops the arms at once if the robot goes soft or its state stops."""
+def daemon(robot, poses, speed):
+    """Always-on service, regular walk mode only. Publishes nothing while idle.
+    Each F1+F2 on the remote steps: off -> pose 1 -> ... -> pose N -> lowered
+    and released. Also lowers + releases when the robot leaves walk mode or on
+    SIGTERM (docker stop); drops the arms at once if the robot goes soft or
+    its state stops."""
     stop = _stop_on_signals()
     robot.listen_remote()
     fsm = _Fsm(robot)
-    print(f"[daemon] ready (FSM {fsm.value}). F1+F2 = raise / lower the tote arm "
-          f"(regular walk mode {sorted(FSM_WALK_OK)} only).", flush=True)
+    print(f"[daemon] ready (FSM {fsm.value}). F1+F2 steps off -> "
+          + " -> ".join(f"pose {i + 1}" for i in range(len(poses)))
+          + f" -> off (regular walk mode {sorted(FSM_WALK_OK)} only).", flush=True)
     prev = robot.keys()
     while not stop.is_set():
         keys = robot.keys()
@@ -582,15 +609,15 @@ def daemon(robot, target_right, speed):
 
         end = threading.Event()
         end.fast = False
+        step = threading.Event()
 
         def watch():
             p = robot.keys()            # combo is still held: needs a release first
             while not end.is_set():
                 k = robot.keys()
                 if combo_edge(p, k):
-                    print("[daemon] F1+F2 -> lowering", flush=True)
-                    end.set()
-                    return
+                    print("[daemon] F1+F2 -> next", flush=True)
+                    step.set()
                 p = k
                 why = release_reason(fsm.value, robot.state_age())
                 if why or stop.is_set():
@@ -604,7 +631,7 @@ def daemon(robot, target_right, speed):
         w.start()
         print("[daemon] F1+F2 -> raising tote arm", flush=True)
         try:
-            carry(robot, target_right, speed, end)
+            carry(robot, poses, speed, end, step)
         except Exception as e:          # never die with the arms taken
             print(f"[daemon] carry error: {e!r}", flush=True)
             if robot.weight > 0:
