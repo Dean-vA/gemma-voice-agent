@@ -59,3 +59,16 @@ def test_parse_pose():
     assert tc.parse_pose("0,-0.2,0,1.6,0,0,0") == [0, -0.2, 0, 1.6, 0, 0, 0]
     with pytest.raises(Exception):
         tc.parse_pose("1,2,3")
+
+
+def test_still_pose_takes_latest_still_window():
+    moving = [[0.1 * i] * 7 for i in range(20)]
+    still = [[1.0] * 7 for _ in range(10)]
+    nudge = [[1.5] * 7]
+    assert tc.still_pose(moving + still + nudge, 10) == pytest.approx([1.0] * 7)
+    assert tc.still_pose(moving, 10) is None
+
+
+def test_waist_is_held_whenever_arm_sdk_is_sent():
+    # Leaving the waist out of an arm_sdk frame makes it limp (robot fell).
+    assert tc.WAIST == [12, 13, 14] and tc.KP_WAIST > 0

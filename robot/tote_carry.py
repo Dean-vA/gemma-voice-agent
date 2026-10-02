@@ -51,6 +51,11 @@ import time
 LEFT_ARM  = [15, 16, 17, 18, 19, 20, 21]   # sh pitch, sh roll, sh yaw, elbow, wr roll, wr pitch, wr yaw
 RIGHT_ARM = [22, 23, 24, 25, 26, 27, 28]
 ARM_JOINTS = LEFT_ARM + RIGHT_ARM
+# arm_sdk at weight 1 also takes the WAIST: any of these joints we leave at
+# kp=0 goes limp (the robot folded at the waist and fell on 2026-10-02). So the
+# waist is always commanded too, held stiff at where it was when we started.
+WAIST = [12, 13, 14]                       # yaw, roll, pitch
+KP_WAIST, KD_WAIST = 200.0, 5.0
 WEIGHT_IDX = 29                            # kNotUsedJoint: arm_sdk blend weight lives in its .q
 
 JOINT_NAMES = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
@@ -140,6 +145,7 @@ class ToteCarry:
         self._crc = CRC()
         self.kp, self.kd = kp, kd
         self.weight = 0.0           # last blend weight actually sent
+        self.waist_q = None         # waist hold targets, captured before taking control
 
     def _on_state(self, msg):
         with self._lock:
@@ -160,12 +166,22 @@ class ToteCarry:
             st = self._state
         return [st.motor_state[j].q for j in ARM_JOINTS]
 
+    def waist(self):
+        with self._lock:
+            st = self._state
+        return [st.motor_state[j].q for j in WAIST]
+
     def mode(self):
         with self._lock:
             return getattr(self._state, "mode_machine", None)
 
     def send(self, arm_targets, weight):
-        """One arm_sdk frame: 14 arm targets + blend weight."""
+        """One arm_sdk frame: 14 arm targets + held waist + blend weight."""
+        if self.waist_q is None:
+            raise RuntimeError("waist hold not captured -- refusing to send arm_sdk")
+        for j, q in zip(WAIST, self.waist_q):
+            m = self._cmd.motor_cmd[j]
+            m.q, m.dq, m.tau, m.kp, m.kd = q, 0.0, 0.0, KP_WAIST, KD_WAIST
         for j, q in zip(ARM_JOINTS, arm_targets):
             wrist = (j - 15) % 7 >= 4
             m = self._cmd.motor_cmd[j]
@@ -197,6 +213,39 @@ def _run_phase(robot, secs, frame_fn, stop=None):
     return True
 
 
+def still_pose(samples, window, tol=0.02):
+    """Mean of the latest `window` consecutive samples in which no joint moved
+    more than `tol` rad, or None if the arm never sat still that long."""
+    for end in range(len(samples), window - 1, -1):
+        chunk = samples[end - window:end]
+        cols = list(zip(*chunk))
+        if all(max(c) - min(c) <= tol for c in cols):
+            return [sum(c) / len(c) for c in cols]
+    return None
+
+
+def record(robot, secs, rate=50):
+    """Read-only pose capture: nothing is published."""
+    print(f"[record] logging arms for {secs:.0f}s (mode {robot.mode()}) -- move the "
+          "right arm into place and hold it still for ~2s")
+    samples, t_end, n = [], time.time() + secs, 0
+    while time.time() < t_end:
+        q = robot.arm_q()
+        samples.append(q[7:])
+        if n % rate == 0:
+            print(f"[record] right: {format_pose(q[7:])}", flush=True)
+        n += 1
+        time.sleep(1.0 / rate)
+    pose = still_pose(samples, 2 * rate)
+    if pose is None:
+        print("[record] arm never held still for 2s -- last sample:")
+        pose = samples[-1]
+    print(f"[record] RIGHT POSE: {format_pose(pose)}")
+    print("[record] --pose " + ",".join(f"{q:.3f}" for q in pose))
+    print(f"[record] left (for reference): {format_pose(robot.arm_q()[:7])}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Hold the G1 right arm in a tote-carry pose")
     ap.add_argument("iface", nargs="?", default="eth0")
@@ -206,6 +255,9 @@ def main(argv=None):
     ap.add_argument("--kd", type=float, default=KD_ARM)
     ap.add_argument("--speed", type=float, default=MAX_SPEED)
     ap.add_argument("--hold-secs", type=float, default=0.0)
+    ap.add_argument("--record", type=float, default=0.0, metavar="SECS",
+                    help="read-only: log both arms for SECS (pose the arm by hand in "
+                         "damped mode) and print the last still pose as a --pose value")
     args = ap.parse_args(argv)
 
     target_right = clamp_pose(args.pose)
@@ -218,7 +270,12 @@ def main(argv=None):
               "is the robot on and the interface right? Nothing sent.")
         return 2
 
+    if args.record > 0:
+        return record(robot, args.record)
+
     start = robot.arm_q()
+    robot.waist_q = robot.waist()
+    print(f"[tote] waist hold: {['%+.2f' % q for q in robot.waist_q]}")
     start_left, start_right = start[:7], start[7:]
     move_secs = move_duration(start_right, target_right, args.speed)
     print(f"[tote] mode_machine={robot.mode()}")
