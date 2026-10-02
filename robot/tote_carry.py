@@ -55,7 +55,7 @@ ARM_JOINTS = LEFT_ARM + RIGHT_ARM
 # kp=0 goes limp (the robot folded at the waist and fell on 2026-10-02). So the
 # waist is always commanded too, held stiff at where it was when we started.
 WAIST = [12, 13, 14]                       # yaw, roll, pitch
-KP_WAIST, KD_WAIST = 200.0, 5.0
+KP_WAIST, KD_WAIST = 200.0, 6.0      # what the loco controller itself uses
 WEIGHT_IDX = 29                            # kNotUsedJoint: arm_sdk blend weight lives in its .q
 
 JOINT_NAMES = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
@@ -84,6 +84,7 @@ FADE_SECS    = 1.0     # weight ramp in/out
 MAX_SPEED    = 0.6     # rad/s, cap on the arm move
 MIN_MOVE_SECS = 1.5
 LOWSTATE_TIMEOUT = 3.0
+TEACH_KD = 1.0         # right-arm damping while it is limp in --teach
 
 
 # ============================ pure helpers (unit-tested) =====================
@@ -139,6 +140,10 @@ class ToteCarry:
         self._state = None
         self._sub = ChannelSubscriber("rt/lowstate", LowState_)
         self._sub.Init(self._on_state, 10)
+        # The loco controller's own motor commands (read-only, diagnostics).
+        self._loco = None
+        self._loco_sub = ChannelSubscriber("rt/lowcmd", LowCmd_)
+        self._loco_sub.Init(self._on_loco, 10)
         self._pub = ChannelPublisher("rt/arm_sdk", LowCmd_)
         self._pub.Init()
         self._cmd = unitree_hg_msg_dds__LowCmd_()
@@ -150,6 +155,21 @@ class ToteCarry:
     def _on_state(self, msg):
         with self._lock:
             self._state = msg
+
+    def _on_loco(self, msg):
+        with self._lock:
+            self._loco = msg
+
+    def loco_summary(self):
+        """rt/lowcmd waist yaw + right elbow (q, kp) -- shows whether that topic
+        is the loco output before or after our arm_sdk blend."""
+        with self._lock:
+            m = self._loco
+        if m is None:
+            return "rt/lowcmd: none"
+        w, e = m.motor_cmd[12], m.motor_cmd[25]
+        return (f"rt/lowcmd waist_yaw q={w.q:+.3f} kp={w.kp:.0f} | "
+                f"r_elbow q={e.q:+.3f} kp={e.kp:.0f}")
 
     def wait_state(self, timeout=LOWSTATE_TIMEOUT):
         t_end = time.time() + timeout
@@ -175,8 +195,10 @@ class ToteCarry:
         with self._lock:
             return getattr(self._state, "mode_machine", None)
 
-    def send(self, arm_targets, weight):
-        """One arm_sdk frame: 14 arm targets + held waist + blend weight."""
+    def send(self, arm_targets, weight, right_gain=1.0, right_kd=None):
+        """One arm_sdk frame: 14 arm targets + held waist + blend weight.
+        right_gain scales the right arm's kp (0 = limp, only damping);
+        right_kd overrides its kd."""
         if self.waist_q is None:
             raise RuntimeError("waist hold not captured -- refusing to send arm_sdk")
         for j, q in zip(WAIST, self.waist_q):
@@ -188,6 +210,10 @@ class ToteCarry:
             m.q, m.dq, m.tau = q, 0.0, 0.0
             m.kp = KP_WRIST if wrist else self.kp
             m.kd = KD_WRIST if wrist else self.kd
+            if j in RIGHT_ARM:
+                m.kp *= right_gain
+                if right_kd is not None:
+                    m.kd = right_kd
         self.weight = min(max(weight, 0.0), 1.0)
         self._cmd.motor_cmd[WEIGHT_IDX].q = self.weight
         self._cmd.crc = self._crc.Crc(self._cmd)
@@ -206,8 +232,7 @@ def _run_phase(robot, secs, frame_fn, stop=None):
     for i in range(1, n + 1):
         if stop is not None and stop.is_set():
             return False
-        targets, weight = frame_fn(i / n)
-        robot.send(targets, weight)
+        robot.send(*frame_fn(i / n))
         t_next += CONTROL_DT
         time.sleep(max(0.0, t_next - time.perf_counter()))
     return True
@@ -246,6 +271,61 @@ def record(robot, secs, rate=50):
     return 0
 
 
+def teach(robot, start, secs, speed, rate=50):
+    """Limp right arm (kp 0, light damping) for `secs` while the left arm and
+    waist stay stiff and the legs stay with the loco controller. Records the
+    last still pose, re-stiffens the arm where it was left, then puts it back."""
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    start_right = start[7:]
+    hold = list(start)
+    samples = []
+    print("[teach] taking the arms (weight 0 -> 1, holding current pose)")
+    _run_phase(robot, FADE_SECS, lambda s: (hold, smoothstep(s)), stop)
+    try:
+        print("[teach] HOLD THE RIGHT ARM -- it goes soft in 1s")
+        _run_phase(robot, 1.0, lambda s: (hold, 1.0, 1.0 - smoothstep(s),
+                                          KD_ARM + (TEACH_KD - KD_ARM) * s), stop)
+        print(f"[teach] right arm is limp for {secs:.0f}s -- move it into the carry "
+              "pose and hold it still for ~2s", flush=True)
+        t_end, n = time.time() + secs, 0
+        while not stop.is_set() and time.time() < t_end:
+            robot.send(hold, 1.0, 0.0, TEACH_KD)
+            q = robot.arm_q()[7:]
+            samples.append(q)
+            if n % rate == 0:
+                print(f"[teach] right: {format_pose(q)}", flush=True)
+                print(f"[teach]   {robot.loco_summary()}", flush=True)
+            n += 1
+            time.sleep(1.0 / rate)
+    finally:
+        stop_now = threading.Event()
+        here = robot.arm_q()[7:]
+        hold[7:] = here
+        print("[teach] re-stiffening the arm where it is (1s)")
+        _run_phase(robot, 1.0, lambda s: (hold, robot.weight, smoothstep(s),
+                                          TEACH_KD + (KD_ARM - TEACH_KD) * s), stop_now)
+        pose = still_pose(samples, 2 * rate) if samples else None
+        if pose is None:
+            print("[teach] arm never held still for 2s -- no pose recorded")
+        else:
+            print(f"[teach] RIGHT POSE: {format_pose(pose)}")
+            print("[teach] --pose " + ",".join(f"{q:.3f}" for q in pose))
+        back = move_duration(here, start_right, speed)
+        print(f"[teach] returning right arm ({back:.1f}s), then releasing")
+
+        def to_start(s):
+            hold[7:] = lerp_pose(here, start_right, s)
+            return hold, robot.weight
+        _run_phase(robot, back, to_start, stop_now)
+        w0 = robot.weight
+        _run_phase(robot, FADE_SECS, lambda s: (hold, w0 * (1.0 - smoothstep(s))), stop_now)
+        robot.send(hold, 0.0)
+        print("[teach] released.")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Hold the G1 right arm in a tote-carry pose")
     ap.add_argument("iface", nargs="?", default="eth0")
@@ -255,6 +335,10 @@ def main(argv=None):
     ap.add_argument("--kd", type=float, default=KD_ARM)
     ap.add_argument("--speed", type=float, default=MAX_SPEED)
     ap.add_argument("--hold-secs", type=float, default=0.0)
+    ap.add_argument("--teach", type=float, default=0.0, metavar="SECS",
+                    help="robot keeps standing; right arm goes limp (damped) for "
+                         "SECS so you can pose it by hand, then the still pose is "
+                         "printed and the arm is put back")
     ap.add_argument("--record", type=float, default=0.0, metavar="SECS",
                     help="read-only: log both arms for SECS (pose the arm by hand in "
                          "damped mode) and print the last still pose as a --pose value")
@@ -288,6 +372,8 @@ def main(argv=None):
     if args.check:
         print("[tote] --check: nothing sent.")
         return 0
+    if args.teach > 0:
+        return teach(robot, start, args.teach, args.speed)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
