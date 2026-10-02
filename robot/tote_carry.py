@@ -183,8 +183,13 @@ class ToteCarry:
         return [st.motor_state[j].q for j in ARM_JOINTS]
 
     def waist(self):
+        """Waist hold targets: the loco controller's own command (rt/lowcmd,
+        read before we take over, so it is pure loco output -- roll/pitch are
+        exactly 0 standing and walking); measured angles if that isn't heard."""
         with self._lock:
-            st = self._state
+            loco, st = self._loco, self._state
+        if loco is not None and self.weight == 0.0:
+            return [loco.motor_cmd[j].q for j in WAIST]
         return [st.motor_state[j].q for j in WAIST]
 
     def mode(self):
