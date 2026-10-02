@@ -36,7 +36,7 @@ Options (all optional):
                          yaw, elbow, wrist roll, pitch, yaw (pose 1 for --daemon)
     --daemon             always-on: F1+F2 steps off -> pose 1 -> pose 2 -> off
     --kp N / --kd N      shoulder+elbow gains (default 60 / 1.5)
-    --speed R            max joint speed for the move, rad/s (default 0.6)
+    --speed R            max joint speed for the move, rad/s (default 1.2)
     --hold-secs S        release automatically after S seconds (default: forever)
 """
 
@@ -83,9 +83,9 @@ KP_ARM, KD_ARM     = 60.0, 1.5
 KP_WRIST, KD_WRIST = 40.0, 1.5
 CONTROL_DT   = 0.02    # 50 Hz -- arm_sdk needs a steady stream
 FADE_SECS    = 1.0     # weight ramp in/out
-MAX_SPEED    = 0.6     # rad/s, cap on the arm move (raise from / lower to rest)
-STEP_SPEED   = 1.5     # rad/s, cap on pose -> pose moves in --daemon
-MIN_MOVE_SECS = 1.5
+MAX_SPEED    = 1.2     # rad/s, cap on the arm move (raise from / lower to rest)
+STEP_SPEED   = 3.0     # rad/s, cap on pose -> pose moves in --daemon
+MIN_MOVE_SECS = 0.75
 LOWSTATE_TIMEOUT = 3.0
 # Loco FSM ids seen on our G1 (2026-10-02). arm_sdk + remote walking works in
 # regular walk mode (501: FSM_MODE goes 0 -> 1). In running mode (801) taking
