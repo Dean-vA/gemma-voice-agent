@@ -142,3 +142,19 @@ services:
     entrypoint: ["sh","-c","pip install sounddevice opencv-python-headless webrtcvad-wheels >/dev/null 2>&1; apt-get install -y libportaudio2 >/dev/null 2>&1 || true; exec python3 /app/g1_gemma_client.py ${G1_IFACE:-eth0}"]
     stdin_open: true
     tty: true
+
+  # Tote-carry arm: always running, publishes nothing until F1+F2 on the remote
+  # (regular walk mode only) raises the right arm into the taught carry pose;
+  # F1+F2 again lowers it. Lowers + releases if the robot leaves walk mode,
+  # drops at once if it goes soft. See tote_carry.py.
+  tote-carry:
+    image: g1-greeter-shadow:latest
+    container_name: g1-tote-carry
+    network_mode: host          # DDS on eth0
+    restart: unless-stopped
+    stop_grace_period: 15s      # SIGTERM lowers (~3 s) and releases before SIGKILL
+    environment:
+      - CYCLONEDDS_HOME=/opt/cyclonedds/install
+    volumes:
+      - ./tote_carry.py:/app/tote_carry.py:ro
+    entrypoint: ["python3", "-u", "/app/tote_carry.py", "${G1_IFACE:-eth0}", "--daemon"]

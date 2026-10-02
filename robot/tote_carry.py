@@ -89,6 +89,17 @@ LOWSTATE_TIMEOUT = 3.0
 FSM_WALK_OK = {501}
 FSM_WALK_LOCKS = {801: "running", 812: "climb"}
 TEACH_KD = 1.0         # right-arm damping while it is limp in --teach
+# Loco FSM ids where the motors go soft: release the arms at once (no lowering
+# move -- the body is collapsing, holding stiff arms would only fight it).
+FSM_SOFT = {0, 1}      # zero torque, damp
+
+# --daemon: wireless-remote combo that toggles the carry. F1 alone is the voice
+# greeter's push-to-talk and F2 alone its presence toggle; the greeter ignores
+# them when pressed together (see g1_gemma_client.py).
+KEY_F1, KEY_F2 = 0x0040, 0x0080
+KEY_COMBO = KEY_F1 | KEY_F2
+FSM_POLL_SECS = 0.3
+STATE_STALE_SECS = 0.5  # no rt/lowstate for this long -> stop driving the arms
 
 
 # ============================ pure helpers (unit-tested) =====================
@@ -100,12 +111,14 @@ def clamp_pose(pose):
             for q, (lo, hi) in zip(pose, RIGHT_LIMITS)]
 
 
-def move_duration(start, target, max_speed=MAX_SPEED, min_secs=MIN_MOVE_SECS):
+def move_duration(start, target, max_speed=MAX_SPEED, min_secs=None):
     """Seconds needed so no joint exceeds max_speed on a smoothstep move.
     Smoothstep peaks at 1.5x the average speed, hence the factor."""
     if max_speed <= 0:
         raise ValueError("max_speed must be > 0")
     biggest = max((abs(t - s) for s, t in zip(start, target)), default=0.0)
+    if min_secs is None:
+        min_secs = MIN_MOVE_SECS
     return max(min_secs, 1.5 * biggest / max_speed)
 
 
@@ -126,6 +139,23 @@ def parse_pose(text):
     return vals
 
 
+def combo_edge(prev_keys, keys, combo=KEY_COMBO):
+    """True on the frame the full key combo becomes held."""
+    return (keys & combo) == combo and (prev_keys & combo) != combo
+
+
+def release_reason(fsm, state_age):
+    """Why a running carry must end now, or None to keep holding.
+    'fast' = drop the blend weight at once (robot going soft / no state);
+    'mode' = lower the arm normally, the robot left regular walk mode.
+    An unreadable FSM (None) is not a reason -- the API read can time out."""
+    if state_age > STATE_STALE_SECS or fsm in FSM_SOFT:
+        return "fast"
+    if fsm is not None and fsm not in FSM_WALK_OK:
+        return "mode"
+    return None
+
+
 def format_pose(pose):
     return "  ".join(f"{n}={q:+.2f}" for n, q in zip(JOINT_NAMES, pose))
 
@@ -142,6 +172,9 @@ class ToteCarry:
         ChannelFactoryInitialize(0, iface)
         self._lock = threading.Lock()
         self._state = None
+        self._state_t = 0.0
+        self._keys = 0
+        self._loco_client = None
         self._sub = ChannelSubscriber("rt/lowstate", LowState_)
         self._sub.Init(self._on_state, 10)
         # The loco controller's own motor commands (read-only, diagnostics).
@@ -159,6 +192,26 @@ class ToteCarry:
     def _on_state(self, msg):
         with self._lock:
             self._state = msg
+            self._state_t = time.monotonic()
+
+    def state_age(self):
+        with self._lock:
+            return time.monotonic() - self._state_t if self._state_t else math.inf
+
+    def listen_remote(self):
+        """Subscribe to the wireless remote (read-only) for keys()."""
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
+
+        def on_wc(msg):
+            with self._lock:
+                self._keys = int(getattr(msg, "keys", 0))
+        self._wc_sub = ChannelSubscriber("rt/wirelesscontroller", WirelessController_)
+        self._wc_sub.Init(on_wc, 10)
+
+    def keys(self):
+        with self._lock:
+            return self._keys
 
     def _on_loco(self, msg):
         with self._lock:
@@ -206,10 +259,12 @@ class ToteCarry:
             import json
             from unitree_sdk2py.g1.loco import g1_loco_api as api
             from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
-            c = LocoClient()
-            c.SetTimeout(2.0)
-            c.Init()
-            code, data = c._Call(api.ROBOT_API_ID_LOCO_GET_FSM_ID, "{}")
+            if self._loco_client is None:
+                c = LocoClient()
+                c.SetTimeout(1.0)
+                c.Init()
+                self._loco_client = c
+            code, data = self._loco_client._Call(api.ROBOT_API_ID_LOCO_GET_FSM_ID, "{}")
             return json.loads(data)["data"] if code == 0 else None
         except Exception:
             return None
@@ -364,6 +419,9 @@ def main(argv=None):
                     help="robot keeps standing; right arm goes limp (damped) for "
                          "SECS so you can pose it by hand, then the still pose is "
                          "printed and the arm is put back")
+    ap.add_argument("--daemon", action="store_true",
+                    help="always-on: F1+F2 on the remote raises / lowers the arm "
+                         "(regular walk mode only); publishes nothing while idle")
     ap.add_argument("--record", type=float, default=0.0, metavar="SECS",
                     help="read-only: log both arms for SECS (pose the arm by hand in "
                          "damped mode) and print the last still pose as a --pose value")
@@ -381,10 +439,11 @@ def main(argv=None):
 
     if args.record > 0:
         return record(robot, args.record)
+    if args.daemon:
+        return daemon(robot, target_right, args.speed)
 
     start = robot.arm_q()
     robot.waist_q = robot.waist()
-    print(f"[tote] waist hold: {['%+.2f' % q for q in robot.waist_q]}")
     start_left, start_right = start[:7], start[7:]
     move_secs = move_duration(start_right, target_right, args.speed)
     print(f"[tote] mode_machine={robot.mode()}")
@@ -411,46 +470,149 @@ def main(argv=None):
     if args.teach > 0:
         return teach(robot, start, args.teach, args.speed)
 
+    stop = _stop_on_signals()
+    if args.hold_secs > 0:
+        t = threading.Timer(args.hold_secs, stop.set)
+        t.daemon = True
+        t.start()
+    carry(robot, target_right, args.speed, stop)
+    return 0
+
+
+def _stop_on_signals():
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+    return stop
 
-    hold = list(start)   # what we are currently commanding (left + right)
-    print("[tote] taking the arms (weight 0 -> 1, holding current pose)")
-    took = _run_phase(robot, FADE_SECS, lambda s: (hold, smoothstep(s)), stop)
+
+def carry(robot, target_right, speed, end, log_every=2.0):
+    """Take the arms (holding where they are), move the right arm into the tote
+    pose, hold until `end` is set, then lower it and hand the arms back.
+    If `end.fast` is set, skip the lowering and drop the weight at once."""
+    start = robot.arm_q()
+    start_right = start[7:]
+    robot.waist_q = robot.waist()       # weight is 0 here -> pure loco command
+    hold = list(start)                  # what we are commanding (left + right)
+    print(f"[tote] waist hold: {['%+.2f' % q for q in robot.waist_q]}")
+    print("[tote] taking the arms (weight 0 -> 1, holding current pose)", flush=True)
+    took = _run_phase(robot, FADE_SECS, lambda s: (hold, smoothstep(s)), end)
     try:
         if took:
-            print("[tote] moving right arm into tote pose")
+            move_secs = move_duration(start_right, target_right, speed)
+            print(f"[tote] moving right arm into tote pose ({move_secs:.1f}s)", flush=True)
 
             def to_tote(s):
                 hold[7:] = lerp_pose(start_right, target_right, s)
                 return hold, 1.0
-            if _run_phase(robot, move_secs, to_tote, stop):
-                print("[tote] holding -- drive with the remote as usual. "
-                      "Ctrl-C to lower the arm and release.")
-                t_end = time.time() + args.hold_secs if args.hold_secs > 0 else math.inf
-                while not stop.is_set() and time.time() < t_end:
-                    _run_phase(robot, 2.0, lambda s: (hold, 1.0), stop)
+            if _run_phase(robot, move_secs, to_tote, end):
+                print("[tote] holding -- drive with the remote as usual.", flush=True)
+                while not end.is_set():
+                    _run_phase(robot, log_every, lambda s: (hold, 1.0), end)
                     meas = robot.arm_q()[7:]
                     err = max(abs(m - t) for m, t in zip(meas, target_right))
                     print(f"[tote] right meas: {format_pose(meas)}  "
-                          f"(max err {err:.2f} rad, mode {robot.mode()})")
+                          f"(max err {err:.2f} rad)", flush=True)
     finally:
-        # Always hand the arms back, even after Ctrl-C mid-move or an error.
+        # Always hand the arms back, even after a stop mid-move or an error.
         stop_now = threading.Event()   # the shutdown path itself is not interruptible
-        here = list(hold[7:])
-        back_secs = move_duration(here, start_right, args.speed)
-        print(f"[tote] lowering right arm ({back_secs:.1f}s)")
+        if getattr(end, "fast", False):
+            if robot.state_age() < STATE_STALE_SECS:
+                hold = robot.arm_q()   # let go where the arm is, no jump
+            print("[tote] FAST release (robot going soft or state lost)", flush=True)
+            w0 = robot.weight
+            _run_phase(robot, 0.3, lambda s: (hold, w0 * (1.0 - s)), stop_now)
+        else:
+            here = list(hold[7:])
+            back_secs = move_duration(here, start_right, speed)
+            print(f"[tote] lowering right arm ({back_secs:.1f}s)", flush=True)
 
-        def to_start(s):
-            hold[7:] = lerp_pose(here, start_right, s)
-            return hold, robot.weight
-        _run_phase(robot, back_secs, to_start, stop_now)
-        print("[tote] releasing arms to the locomotion controller (weight 1 -> 0)")
-        w0 = robot.weight          # may be < 1 if stopped mid fade-in
-        _run_phase(robot, FADE_SECS, lambda s: (hold, w0 * (1.0 - smoothstep(s))), stop_now)
+            def to_start(s):
+                hold[7:] = lerp_pose(here, start_right, s)
+                return hold, robot.weight
+            _run_phase(robot, back_secs, to_start, stop_now)
+            print("[tote] releasing arms to the locomotion controller", flush=True)
+            w0 = robot.weight          # may be < 1 if stopped mid fade-in
+            _run_phase(robot, FADE_SECS,
+                       lambda s: (hold, w0 * (1.0 - smoothstep(s))), stop_now)
         robot.send(hold, 0.0)
-        print("[tote] released.")
+        print("[tote] released.", flush=True)
+
+
+class _Fsm:
+    """Background poller for the loco FSM id (the API call can take a while)."""
+    def __init__(self, robot):
+        self.value = robot.fsm_id()
+        self._robot = robot
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while True:
+            time.sleep(FSM_POLL_SECS)
+            v = self._robot.fsm_id()
+            if v is not None:
+                self.value = v
+
+
+def daemon(robot, target_right, speed):
+    """Always-on service: F1+F2 on the remote toggles the carry, only in regular
+    walk mode. Publishes nothing while idle. Lowers + releases on the next
+    F1+F2, when the robot leaves walk mode, or on SIGTERM (docker stop);
+    drops the arms at once if the robot goes soft or its state stops."""
+    stop = _stop_on_signals()
+    robot.listen_remote()
+    fsm = _Fsm(robot)
+    print(f"[daemon] ready (FSM {fsm.value}). F1+F2 = raise / lower the tote arm "
+          f"(regular walk mode {sorted(FSM_WALK_OK)} only).", flush=True)
+    prev = robot.keys()
+    while not stop.is_set():
+        keys = robot.keys()
+        pressed = combo_edge(prev, keys)
+        prev = keys
+        if not pressed:
+            time.sleep(CONTROL_DT)
+            continue
+        if fsm.value not in FSM_WALK_OK:
+            print(f"[daemon] F1+F2 ignored: FSM {fsm.value} is not regular walk mode "
+                  "(R1+X)", flush=True)
+            continue
+        if robot.state_age() > STATE_STALE_SECS:
+            print("[daemon] F1+F2 ignored: no rt/lowstate", flush=True)
+            continue
+
+        end = threading.Event()
+        end.fast = False
+
+        def watch():
+            p = robot.keys()            # combo is still held: needs a release first
+            while not end.is_set():
+                k = robot.keys()
+                if combo_edge(p, k):
+                    print("[daemon] F1+F2 -> lowering", flush=True)
+                    end.set()
+                    return
+                p = k
+                why = release_reason(fsm.value, robot.state_age())
+                if why or stop.is_set():
+                    end.fast = why == "fast"
+                    print(f"[daemon] releasing ({why or 'service stopping'}, "
+                          f"FSM {fsm.value})", flush=True)
+                    end.set()
+                    return
+                time.sleep(CONTROL_DT)
+        w = threading.Thread(target=watch, daemon=True)
+        w.start()
+        print("[daemon] F1+F2 -> raising tote arm", flush=True)
+        try:
+            carry(robot, target_right, speed, end)
+        except Exception as e:          # never die with the arms taken
+            print(f"[daemon] carry error: {e!r}", flush=True)
+            if robot.weight > 0:
+                robot.send(robot.arm_q(), 0.0)
+        end.set()
+        w.join(timeout=1.0)
+        prev = robot.keys()
+    print("[daemon] stopped.", flush=True)
     return 0
 
 

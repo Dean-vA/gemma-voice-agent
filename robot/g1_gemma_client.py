@@ -62,6 +62,12 @@ HTTP_TIMEOUT    = float(os.environ.get("GEMMA_TIMEOUT", "60"))
 # Verified on this G1: F2=0x0080, F1=0x0040 (both unmapped in sport mode).
 KEY_TOGGLE = 0x0080       # F2  -> master on/off (latching, rising edge)
 KEY_TALK   = 0x0040       # F1  -> push-to-talk (hold to record)
+# F1+F2 together belongs to tote_carry.py --daemon (raise/lower the tote arm),
+# so neither greeter action fires for the combo: F1 waits COMBO_GRACE for F2
+# before recording, F2 toggles presence on RELEASE unless F1 joined, and a
+# recording is discarded if F2 is pressed during it.
+KEY_COMBO   = KEY_TALK | KEY_TOGGLE
+COMBO_GRACE = 0.15        # seconds
 
 # --- Mic (G1 4-mic array via UDP multicast; works in NORMAL mode) --------
 MIC_GROUP    = "239.168.123.161"   # G1 mic multicast group
@@ -405,7 +411,18 @@ def stream_gemma(wav_bytes, image_bytes, on_token):
 def run_interaction(audio, video, mic_sock):
     print("  listening (hold talk key)...")
     set_led(audio, 0, 200, 0)                        # green: listening
-    clip = record_while_held(mic_sock, lambda: bool(get_keys() & KEY_TALK))
+    combo = {"seen": False}
+
+    def talk_held():
+        k = get_keys()
+        if k & KEY_TOGGLE:                 # F2 joined: tote-arm combo, not speech
+            combo["seen"] = True
+        return bool(k & KEY_TALK) and not combo["seen"]
+    clip = record_while_held(mic_sock, talk_held)
+    if combo["seen"]:
+        print("  (F1+F2 combo -- recording discarded)")
+        set_led(audio, 20, 20, 20)
+        return
     if clip is None:
         print("  (no audio captured)")
         set_led(audio, 0, 80, 160)
@@ -577,20 +594,44 @@ def main():
             print(f"[web] control centre unavailable ({e}); continuing headless")
 
     prev = 0
+    f2_combo = False                  # F1 seen while F2 was down -> no presence toggle
     set_led(audio, 20, 20, 20)        # dim: off
-    print("Ready. F2 = presence-mode on/off, hold F1 = push-to-talk. Ctrl+C to quit.")
+    print("Ready. F2 = presence-mode on/off, hold F1 = push-to-talk, "
+          "F1+F2 = tote arm (separate service). Ctrl+C to quit.")
+
+    def wait_combo_release():
+        while get_keys() & KEY_COMBO:
+            time.sleep(0.02)
 
     try:
         while True:
             keys = get_keys()
 
-            if (keys & KEY_TOGGLE) and not (prev & KEY_TOGGLE):   # F2 rising edge
-                if presence is not None:
+            if keys & KEY_TOGGLE and keys & KEY_TALK:
+                f2_combo = True
+            if (prev & KEY_TOGGLE) and not (keys & KEY_TOGGLE):   # F2 released
+                if f2_combo:
+                    f2_combo = False                              # was F1+F2
+                elif presence is not None:
                     presence.toggle()
                 else:
                     print("[presence] not available on this run")
 
-            if (keys & KEY_TALK) and not (prev & KEY_TALK):       # F1 rising edge
+            if (keys & KEY_TALK) and not (prev & KEY_TALK) and not (keys & KEY_TOGGLE):
+                # F1 rising edge, alone so far: give F2 a moment to join (combo)
+                t_end = time.time() + COMBO_GRACE
+                while time.time() < t_end and (get_keys() & KEY_TALK):
+                    if get_keys() & KEY_TOGGLE:
+                        break
+                    time.sleep(0.01)
+                if get_keys() & KEY_TOGGLE:
+                    wait_combo_release()                          # F1+F2: not ours
+                    f2_combo = False
+                    prev = get_keys()
+                    continue
+                if not (get_keys() & KEY_TALK):
+                    prev = get_keys()                             # tap < grace: ignore
+                    continue
                 if CONVERSATION_BUSY.is_set():
                     print("[talk] busy (presence active); ignoring F1")
                 else:
@@ -602,6 +643,7 @@ def main():
                     finally:
                         CONVERSATION_BUSY.clear()
                     prev = get_keys()
+                    f2_combo = bool(prev & KEY_TOGGLE)   # F2 joined mid-recording
                     continue
 
             prev = keys
