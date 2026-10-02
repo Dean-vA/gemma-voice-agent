@@ -251,7 +251,11 @@ def main(argv=None):
                       "Ctrl-C to lower the arm and release.")
                 t_end = time.time() + args.hold_secs if args.hold_secs > 0 else math.inf
                 while not stop.is_set() and time.time() < t_end:
-                    _run_phase(robot, 0.5, lambda s: (hold, 1.0), stop)
+                    _run_phase(robot, 2.0, lambda s: (hold, 1.0), stop)
+                    meas = robot.arm_q()[7:]
+                    err = max(abs(m - t) for m, t in zip(meas, target_right))
+                    print(f"[tote] right meas: {format_pose(meas)}  "
+                          f"(max err {err:.2f} rad, mode {robot.mode()})")
     finally:
         # Always hand the arms back, even after Ctrl-C mid-move or an error.
         stop_now = threading.Event()   # the shutdown path itself is not interruptible
