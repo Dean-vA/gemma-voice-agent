@@ -80,6 +80,12 @@ FADE_SECS    = 1.0     # weight ramp in/out
 MAX_SPEED    = 0.6     # rad/s, cap on the arm move
 MIN_MOVE_SECS = 1.5
 LOWSTATE_TIMEOUT = 3.0
+# Loco FSM ids seen on our G1 (2026-10-02). arm_sdk + remote walking works in
+# regular walk mode (501: FSM_MODE goes 0 -> 1). In running mode (801) taking
+# the arms flips FSM_MODE to 3 and the remote no longer walks the robot --
+# Unitree: "Only Regular mode (R1+X) is supported, Running mode (R2+A) is not".
+FSM_WALK_OK = {501}
+FSM_RUNNING = 801
 TEACH_KD = 1.0         # right-arm damping while it is limp in --teach
 
 
@@ -191,6 +197,20 @@ class ToteCarry:
         if loco is not None and self.weight == 0.0:
             return [loco.motor_cmd[j].q for j in WAIST]
         return [st.motor_state[j].q for j in WAIST]
+
+    def fsm_id(self):
+        """Loco FSM id via LocoClient's (registered but unwrapped) getter, or None."""
+        try:
+            import json
+            from unitree_sdk2py.g1.loco import g1_loco_api as api
+            from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+            c = LocoClient()
+            c.SetTimeout(2.0)
+            c.Init()
+            code, data = c._Call(api.ROBOT_API_ID_LOCO_GET_FSM_ID, "{}")
+            return json.loads(data)["data"] if code == 0 else None
+        except Exception:
+            return None
 
     def mode(self):
         with self._lock:
@@ -336,6 +356,8 @@ def main(argv=None):
     ap.add_argument("--kd", type=float, default=KD_ARM)
     ap.add_argument("--speed", type=float, default=MAX_SPEED)
     ap.add_argument("--hold-secs", type=float, default=0.0)
+    ap.add_argument("--force-mode", action="store_true",
+                    help="take the arms even in running mode (walking will lock)")
     ap.add_argument("--teach", type=float, default=0.0, metavar="SECS",
                     help="robot keeps standing; right arm goes limp (damped) for "
                          "SECS so you can pose it by hand, then the still pose is "
@@ -370,6 +392,17 @@ def main(argv=None):
     if start_right[3] < 0.2:
         print("[tote] WARNING: right elbow reads < 0.2 rad. A standing G1 normally "
               "reads ~0.8-1.0 -- check the sign convention before moving.")
+    fsm = robot.fsm_id()
+    print(f"[tote] loco FSM id={fsm}")
+    if fsm == FSM_RUNNING and not args.force_mode:
+        print("[tote] REFUSING: robot is in running mode (801). Taking the arms there "
+              "locks walking. Switch to regular walk mode (R1+X, FSM 501), or pass "
+              "--force-mode to hold anyway (robot will not walk).")
+        if not args.check:
+            return 3
+    elif fsm not in FSM_WALK_OK:
+        print(f"[tote] WARNING: FSM {fsm} untested -- walking with the arm held is "
+              "only verified in regular walk mode (501).")
     if args.check:
         print("[tote] --check: nothing sent.")
         return 0
