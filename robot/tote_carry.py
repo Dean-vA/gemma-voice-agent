@@ -9,10 +9,9 @@ in with weight `motor_cmd[29].q` (0 = loco owns the arms, 1 = we do) and keeps
 balancing the legs + waist itself. Same mechanism as Unitree's xr_teleoperate
 "motion mode".
 
-Pose: right forearm bent ~100 deg and pointing forward, tilted slightly up so
-the tote handles slide into the crook of the elbow, upper arm a little out from
-the body so the bag hangs clear of the thigh. The left arm is held where it was
-when the script started.
+Pose: recorded by hand with --teach (see TOTE_POSE). The left arm and the
+waist are held where they were when the script started -- arm_sdk's blend
+weight covers the whole upper body, so anything left uncommanded goes limp.
 
 Sequence:  wait for rt/lowstate -> capture current arm pose -> fade arm_sdk
 weight 0->1 holding that pose -> move the right arm (speed-limited) into the
@@ -71,11 +70,8 @@ LIMIT_MARGIN = 0.1
 # Conventions (match the stock standing pose: shoulder pitch +0.35, right roll
 # -0.16, elbow +0.87): +shoulder pitch swings the arm back, -right shoulder roll
 # swings it out, +elbow bends it.
-TOTE_POSE = [-0.10,   # shoulder pitch: upper arm a touch forward
-             -0.25,   # shoulder roll: out from the body, bag clears the thigh
-              0.00,   # shoulder yaw
-              1.75,   # elbow ~100 deg: forearm forward, tilted up a little
-              0.00, 0.00, 0.00]   # wrist neutral
+# Recorded by hand with --teach on 2026-10-02 (arm posed for the tote bag).
+TOTE_POSE = [-0.170, -0.061, 0.038, 0.502, 1.071, -0.075, 0.593]
 
 KP_ARM, KD_ARM     = 60.0, 1.5
 KP_WRIST, KD_WRIST = 40.0, 1.5
