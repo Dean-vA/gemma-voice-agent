@@ -73,9 +73,11 @@ LIMIT_MARGIN = 0.1
 # swings it out, +elbow bends it.
 # Recorded by hand with --teach on 2026-10-02 (arm posed for the tote bag).
 TOTE_POSE = [-0.170, -0.061, 0.038, 0.502, 1.071, -0.075, 0.593]
-# Second pose, also taught by hand (2026-10-02). --daemon steps through
-# TOTE_POSES one F1+F2 press at a time, then lowers on the press after the last.
-TOTE_POSE_2 = [0.145, -0.146, 0.285, 1.211, 0.615, 0.013, -0.071]
+# Second pose: the arm raised forward, from a once-per-second --teach sample
+# taken while the arm was moving (2026-10-02) -- the auto-picked still pose was
+# the wrong one. --daemon steps through TOTE_POSES one F1+F2 press at a time,
+# then lowers on the press after the last.
+TOTE_POSE_2 = [-1.78, -0.29, -0.06, 1.01, 0.00, -0.13, -0.07]
 TOTE_POSES = [TOTE_POSE, TOTE_POSE_2]
 
 KP_ARM, KD_ARM     = 60.0, 1.5
