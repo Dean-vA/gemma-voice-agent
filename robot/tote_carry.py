@@ -84,8 +84,10 @@ LOWSTATE_TIMEOUT = 3.0
 # regular walk mode (501: FSM_MODE goes 0 -> 1). In running mode (801) taking
 # the arms flips FSM_MODE to 3 and the remote no longer walks the robot --
 # Unitree: "Only Regular mode (R1+X) is supported, Running mode (R2+A) is not".
+# Climb mode (812) is the same: arm_sdk is honoured (after a ~6 s fade-in by the
+# controller) and the stepping toggle still works, but the sticks don't walk it.
 FSM_WALK_OK = {501}
-FSM_RUNNING = 801
+FSM_WALK_LOCKS = {801: "running", 812: "climb"}
 TEACH_KD = 1.0         # right-arm damping while it is limp in --teach
 
 
@@ -357,7 +359,7 @@ def main(argv=None):
     ap.add_argument("--speed", type=float, default=MAX_SPEED)
     ap.add_argument("--hold-secs", type=float, default=0.0)
     ap.add_argument("--force-mode", action="store_true",
-                    help="take the arms even in running mode (walking will lock)")
+                    help="take the arms even in running/climb mode (walking will lock)")
     ap.add_argument("--teach", type=float, default=0.0, metavar="SECS",
                     help="robot keeps standing; right arm goes limp (damped) for "
                          "SECS so you can pose it by hand, then the still pose is "
@@ -394,10 +396,10 @@ def main(argv=None):
               "reads ~0.8-1.0 -- check the sign convention before moving.")
     fsm = robot.fsm_id()
     print(f"[tote] loco FSM id={fsm}")
-    if fsm == FSM_RUNNING and not args.force_mode:
-        print("[tote] REFUSING: robot is in running mode (801). Taking the arms there "
-              "locks walking. Switch to regular walk mode (R1+X, FSM 501), or pass "
-              "--force-mode to hold anyway (robot will not walk).")
+    if fsm in FSM_WALK_LOCKS and not args.force_mode:
+        print(f"[tote] REFUSING: robot is in {FSM_WALK_LOCKS[fsm]} mode ({fsm}). Taking "
+              "the arms there locks walking. Switch to regular walk mode (R1+X, FSM "
+              "501), or pass --force-mode to hold anyway (robot will not walk).")
         if not args.check:
             return 3
     elif fsm not in FSM_WALK_OK:
