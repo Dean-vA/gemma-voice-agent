@@ -84,7 +84,8 @@ KP_ARM, KD_ARM     = 60.0, 1.5
 KP_WRIST, KD_WRIST = 40.0, 1.5
 CONTROL_DT   = 0.02    # 50 Hz -- arm_sdk needs a steady stream
 FADE_SECS    = 1.0     # weight ramp in/out
-MAX_SPEED    = 0.6     # rad/s, cap on the arm move
+MAX_SPEED    = 0.6     # rad/s, cap on the arm move (raise from / lower to rest)
+STEP_SPEED   = 1.5     # rad/s, cap on pose -> pose moves in --daemon
 MIN_MOVE_SECS = 1.5
 LOWSTATE_TIMEOUT = 3.0
 # Loco FSM ids seen on our G1 (2026-10-02). arm_sdk + remote walking works in
@@ -545,7 +546,7 @@ class _AnySet:
         return any(e.is_set() for e in self._events)
 
 
-def carry(robot, poses, speed, end, step=None, log_every=2.0):
+def carry(robot, poses, speed, end, step=None, log_every=2.0, step_speed=STEP_SPEED):
     """Take the arms (holding where they are), move the right arm into poses[0]
     and hold. Each time `step` is set, move on to the next pose; a step on the
     last pose (or `end`) lowers the arm and hands the arms back. Steps that
@@ -562,7 +563,7 @@ def carry(robot, poses, speed, end, step=None, log_every=2.0):
     try:
         for i, target in enumerate(poses if took else []):
             here = list(hold[7:])
-            move_secs = move_duration(here, target, speed)
+            move_secs = move_duration(here, target, speed if i == 0 else step_speed)
             print(f"[tote] moving right arm to pose {i + 1}/{len(poses)} "
                   f"({move_secs:.1f}s)", flush=True)
 
