@@ -19,7 +19,10 @@ CAM_BACKEND = os.environ.get(
     "CAM_BACKEND", "v4l2" if sys.platform.startswith("linux") else "auto")
 CAM_W   = int(os.environ.get("CAM_W", "640"))
 CAM_H   = int(os.environ.get("CAM_H", "480"))
-CAM_FPS = float(os.environ.get("CAM_FPS", "15"))  # videohub poll rate
+# videohub poll rate. The hub makes ~15 new frames/s at uneven intervals; polling
+# at that same rate drifts against it (repeats one frame, skips the next), so poll
+# twice as often and decode only the frames that changed.
+CAM_FPS = float(os.environ.get("CAM_FPS", "30"))
 JPEG_Q  = int(os.environ.get("CAM_JPEG_Q", "60"))
 
 _cap = None
@@ -49,6 +52,7 @@ class _VideoHubCap:
         self._client = _videohub_client()
         self._next = 0.0
         self._open = True
+        self._last = (None, None)          # (JPEG bytes, decoded frame)
 
     def isOpened(self):
         return self._open
@@ -71,15 +75,18 @@ class _VideoHubCap:
             return False, None
         if code != 0 or not data:
             return False, None
-        img = cv2.imdecode(np.frombuffer(bytes(data), np.uint8),
-                           cv2.IMREAD_REDUCED_COLOR_2)
+        jpg = bytes(data)
+        if jpg == self._last[0]:
+            return True, self._last[1].copy()   # callers may draw on it
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_REDUCED_COLOR_2)
         if img is None:
             return False, None
         h, w = img.shape[:2]
         if w != CAM_W:
             img = cv2.resize(img, (CAM_W, round(h * CAM_W / w)),
                              interpolation=cv2.INTER_AREA)
-        return True, img
+        self._last = (jpg, img)
+        return True, img.copy()
 
     def release(self):
         self._open = False

@@ -125,17 +125,18 @@ def get_keys():
 
 
 # ===================== MODE (passive read for gesture gate) ==================
+# rt/lowstate arrives 500 times a second. Decoding each one in a Python callback
+# kept a core busy and starved the other threads of the GIL (the camera grabber
+# fell to a few frames a second), so it is read only when the wave asks for it.
 _mode_lock = threading.Lock()
-_latest_mode = None
-
-def _lowstate_handler(msg):
-    global _latest_mode
-    with _mode_lock:
-        _latest_mode = int(getattr(msg, "mode_machine", -1))
+_lowstate_sub = None
 
 def get_mode():
+    if _lowstate_sub is None:
+        return None
     with _mode_lock:
-        return _latest_mode
+        msg = _lowstate_sub.Read(0.5)
+    return int(getattr(msg, "mode_machine", -1)) if msg is not None else None
 
 
 # ============================ MIC ============================================
@@ -486,8 +487,10 @@ def main():
     # Passive mode subscription (read-only): mode_machine for the wave gate.
     if HGLowState_ is not None:
         try:
+            global _lowstate_sub
             ls = ChannelSubscriber("rt/lowstate", HGLowState_)
-            ls.Init(_lowstate_handler, 10)
+            ls.Init()                     # no handler: samples wait in DDS until read
+            _lowstate_sub = ls
         except Exception as e:
             print(f"[mode] lowstate subscribe failed (wave will stay disabled): {e}")
 
