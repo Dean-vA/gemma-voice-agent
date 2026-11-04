@@ -39,7 +39,14 @@ class ParakeetASR:
     async def transcribe(self, samples: np.ndarray) -> str:
         """Transcribe 16 kHz mono float32 audio."""
         async with self._lock:
-            return (await asyncio.to_thread(self.model.transcribe, samples)).strip()
+            job = asyncio.ensure_future(asyncio.to_thread(self.model.transcribe, samples))
+            try:
+                return (await asyncio.shield(job)).strip()
+            finally:
+                if not job.done():
+                    # Cancelled (the turn was dropped): the thread can't be stopped,
+                    # so keep the model locked until it has finished.
+                    await asyncio.wait({job})
 
 
 def load_parakeet(settings: Settings) -> ParakeetASR | None:
