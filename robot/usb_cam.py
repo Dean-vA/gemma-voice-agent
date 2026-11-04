@@ -25,15 +25,28 @@ JPEG_Q  = int(os.environ.get("CAM_JPEG_Q", "60"))
 _cap = None
 _lock = threading.Lock()
 
+_hub_client = None
+
+def _videohub_client():
+    # One client for the process: reset() reopens the capture, and a fresh
+    # VideoClient each time would leave the old DDS channels behind.
+    global _hub_client
+    if _hub_client is None:
+        from unitree_sdk2py.go2.video.video_client import VideoClient
+        c = VideoClient()                 # needs ChannelFactoryInitialize first
+        # The hub answers in ~5 ms but now and then drops a reply; a short
+        # timeout skips that frame instead of tripping the stall watchdog.
+        c.SetTimeout(float(os.environ.get("CAM_HUB_TIMEOUT", "1.0")))
+        c.Init()
+        _hub_client = c
+    return _hub_client
+
 class _VideoHubCap:
     """The few cv2.VideoCapture methods callers use, backed by the video hub.
     read() paces itself to CAM_FPS so the grabber loop doesn't spin; frames are
     scaled to CAM_W wide, keeping the hub's 16:9 aspect."""
     def __init__(self):
-        from unitree_sdk2py.go2.video.video_client import VideoClient
-        self._client = VideoClient()      # needs ChannelFactoryInitialize first
-        self._client.SetTimeout(3.0)
-        self._client.Init()
+        self._client = _videohub_client()
         self._next = 0.0
         self._open = True
 
