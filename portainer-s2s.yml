@@ -1,0 +1,45 @@
+# Portainer Stack (Git-based) — the Reachy speech pipeline, for comparing with the gateway.
+#
+# The backend the Reachy Mini (Ruxithid) runs on, unchanged, in one container on one GPU:
+# Hugging Face's speech-to-speech server doing the turn-taking, Parakeet + TitaNet transcribing,
+# Gemma 4 12B (llama.cpp) reading the transcript, Qwen3-TTS speaking. The G1 client connects to
+# it instead of the gateway: ws://<host>:${S2S_PORT}/v1/realtime (control centre > link >
+# "Reachy backend"). The code is copied from the Reachy project; see s2s/README.md.
+#
+# Deploy: Stacks > Add stack > Repository, this repo, Compose path portainer-s2s.yml, on
+# "Student apps (cluster)" (or any Docker host with a free GPU of at least 24 GB). The image is
+# pulled from GHCR, built by .github/workflows/s2s-images.yml; nothing is built on the host.
+#
+# Environment variables (Portainer's panel), all optional:
+#   S2S_PORT    published port of the speech server (2740)
+#   S2S_VOICE   plain-English description of the voice (Qwen3-TTS voice design)
+#
+# On a host with several GPUs, `count: 1` takes the first; to pin one instead, replace it with
+#   device_ids: ['<index>']   (not the gateway's GPU)
+# Locally: docker compose -f portainer-s2s.yml up   (add --build to build the image here)
+
+services:
+  speech:
+    build:
+      context: .
+      dockerfile: s2s/Dockerfile
+    image: ghcr.io/dean-va/s2s-backend:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - --voice=${S2S_VOICE:-A friendly young man with a clear, warm voice. He speaks at a relaxed, natural pace, upbeat and a little playful.}
+    volumes:
+      - s2s-cache:/root/.cache   # models: Gemma 12B GGUF, Qwen3-TTS, Parakeet, TitaNet, VAD (~15 GB)
+      - s2s-logs:/srv/logs       # table_log.py (what was heard and said, per day) and llama.cpp's log
+    ports:
+      - "${S2S_PORT:-2740}:8765"
+
+volumes:
+  s2s-cache:
+  s2s-logs:

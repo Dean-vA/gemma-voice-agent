@@ -1,0 +1,66 @@
+# The Reachy speech pipeline on Kubernetes (the adsai-rke2 cluster), for comparing with the
+# gateway: one pod, one GPU (about 22 GB used). The container runs what backend.py runs on
+# Windows for the Reachy Mini: llama.cpp (Gemma 4 12B), speaker-aware transcription (Parakeet +
+# TitaNet) and the speech server (speech-to-speech + Qwen3-TTS). See s2s/README.md.
+#
+# Deploy in Portainer: adsai-rke2 > Applications > Create from manifest (or from this repo,
+# path k8s/s2s.yaml), into a namespace of your choice. The image comes from GHCR, built by
+# .github/workflows/s2s-images.yml. The G1 connects to ws://<any node>:32740/v1/realtime.
+# If the cluster's GPU nodes need it, uncomment runtimeClassName: nvidia.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: s2s-cache, labels: { app: s2s } }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 40Gi } }   # Gemma 12B GGUF, Qwen3-TTS, Parakeet, TitaNet, VAD
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: s2s-logs, labels: { app: s2s } }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }    # table_log.py (heard and said, per day) + llama.cpp log
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: s2s-backend, labels: { app: s2s } }
+spec:
+  replicas: 1   # the speech server holds one conversation at a time
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: s2s } }
+  template:
+    metadata: { labels: { app: s2s } }
+    spec:
+      # runtimeClassName: nvidia
+      containers:
+        - name: backend
+          image: ghcr.io/dean-va/s2s-backend:latest
+          imagePullPolicy: Always
+          args:
+            - --voice=A friendly young man with a clear, warm voice. He speaks at a relaxed, natural pace, upbeat and a little playful.
+          ports: [{ containerPort: 8765 }]
+          resources:
+            limits: { nvidia.com/gpu: 1 }
+            requests: { cpu: "4", memory: 24Gi }
+          volumeMounts:
+            - { name: cache, mountPath: /root/.cache }
+            - { name: logs, mountPath: /srv/logs }
+          startupProbe:          # the first start downloads about 15 GB of models
+            tcpSocket: { port: 8765 }
+            periodSeconds: 10
+            failureThreshold: 180
+          readinessProbe:
+            tcpSocket: { port: 8765 }
+            periodSeconds: 10
+      volumes:
+        - { name: cache, persistentVolumeClaim: { claimName: s2s-cache } }
+        - { name: logs, persistentVolumeClaim: { claimName: s2s-logs } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: s2s-backend, labels: { app: s2s } }
+spec:
+  type: NodePort
+  selector: { app: s2s }
+  ports: [{ port: 8765, targetPort: 8765, nodePort: 32740 }]

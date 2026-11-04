@@ -1,0 +1,38 @@
+# Build the Reachy speech pipeline's image and push it to GHCR, so the cluster
+# (k8s/s2s.yaml, or the portainer-s2s.yml stack) can pull it. Runs when s2s/ changes on main, or by hand.
+name: s2s images
+
+on:
+  push:
+    branches: [main, feat/s2s-backend]   # the feature branch too, so it can be tried before merging
+    paths: ["s2s/**", ".github/workflows/s2s-images.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # The CUDA + PyTorch images need more disk than a runner has free by default.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: s2s/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/dean-va/s2s-backend:latest
+            ghcr.io/dean-va/s2s-backend:${{ github.sha }}

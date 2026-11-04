@@ -131,7 +131,7 @@ class Hub:
                     d["image_bytes"] = len(img)
                 self.current = {"hops": {}, "metrics": {}, "heard": "",
                                 "reply": "", "t": time.time(), **d}
-            elif ev in ("first_token", "first_audio"):
+            elif ev in ("first_token", "first_audio", "end_to_sound"):
                 if self.current is not None:
                     self.current["hops"][ev + "_ms"] = d.get("ms")
             elif ev == "heard":
@@ -140,6 +140,11 @@ class Hub:
             elif ev == "reply":
                 if self.current is not None:
                     self.current["reply"] = d.get("reply", "")
+            elif ev == "cut":
+                # Cut off after the reply had been written (it was still playing):
+                # the finished turn keeps only what was heard.
+                if self.current is None and self.last_turn is not None:
+                    self.last_turn["reply"] = d.get("reply", "")
             elif ev == "metrics":
                 if self.current is not None:
                     self.current["metrics"] = d.get("metrics") or {}
@@ -642,8 +647,10 @@ def _build_app(hub, store, controller, busy):
         if request.method == "POST":
             body = request.get_json(force=True) or {}
             o = presence.STREAM
-            if body.get("transport") in ("http", "ws"):
+            if body.get("transport") in ("http", "ws", "s2s"):
                 o["transport"] = body["transport"]
+            if isinstance(body.get("s2s_url"), str):
+                o["s2s_url"] = body["s2s_url"].strip()
             for k in STREAM_BOOLS:
                 if k in body:
                     o[k] = bool(body[k])
@@ -672,6 +679,27 @@ def _build_app(hub, store, controller, busy):
             print(f"[web] conversation link: transport={o['transport']} barge_in={o['barge_in']} "
                   f"aec={o['aec']} vad_overrides={o['vad']}")
         return jsonify(_stream_snapshot())
+
+    @app.route("/api/turns.csv")
+    def api_turns_csv():
+        """The last 40 turns with the link each went over, for comparing them.
+        stop_to_sound_ms is timed the same way for every link (see streaming.py)."""
+        import csv
+        with hub._lock:
+            turns = list(hub.turns)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["time", "link", "phase", "stop_to_sound_ms", "first_audio_ms", "total_ms",
+                    "cut", "heard", "reply"])
+        for t in turns:
+            h = t.get("hops") or {}
+            r = lambda v: "" if v is None else round(float(v))
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t.get("t", 0))),
+                        t.get("transport", ""), t.get("phase", ""), r(h.get("end_to_sound_ms")),
+                        r(h.get("first_audio_ms")), r(h.get("total_ms")),
+                        int((t.get("reply") or "").endswith(" —")), t.get("heard", ""), t.get("reply", "")])
+        return Response(out.getvalue(), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=turns.csv"})
 
     @app.route("/api/conversation")
     def api_conversation():
@@ -1027,7 +1055,12 @@ label.chk input{padding:0;accent-color:var(--acc)}
         <select id=st_transport>
           <option value=http>HTTP · one utterance per request (robot VAD)</option>
           <option value=ws>WebSocket · streamed (gateway VAD, barge-in)</option>
+          <option value=s2s>Reachy backend · speech-to-speech (its VAD, Gemma 12B, Qwen3 voice)</option>
         </select>
+      </div>
+      <div class=prow id=st_s2s style=margin-top:8px>
+        <label for=st_s2s_url title="The Reachy backend's realtime WebSocket, e.g. ws://host:32740/v1/realtime. Greeting, conversation and goodbye all go through it.">backend</label>
+        <input id=st_s2s_url type=text placeholder="ws://host:32740/v1/realtime" style=flex:1>
       </div>
       <div id=st_ws>
         <div class=prow style=margin-top:8px>
@@ -1042,6 +1075,7 @@ label.chk input{padding:0;accent-color:var(--acc)}
           <label for=st_aec_delay_ms title="Where the echo reference is placed after a clip is sent to the speaker. Empty = automatic. Only the older canceller needs a figure.">echo delay ms</label>
           <input id=st_aec_delay_ms type=number min=0 max=1000 step=5 placeholder=auto style=width:84px>
         </div>
+        <div id=st_gwtd>
         <h2 style=margin-top:12px>Gateway turn detection</h2>
         <div class=tune>
           <label>speech threshold <span id=sv_vad_threshold>—</span></label><input type=range id=sx_vad_threshold min=0.2 max=0.95 step=0.05>
@@ -1059,6 +1093,7 @@ label.chk input{padding:0;accent-color:var(--acc)}
           <label>wait before answering an unfinished turn, ms <span id=sv_smart_turn_incomplete_delay_ms>—</span></label><input type=range id=sx_smart_turn_incomplete_delay_ms min=0 max=3000 step=100>
         </div>
         <div class=prow style=margin-top:8px><button id=st_reset>Gateway defaults</button></div>
+        </div>
       </div>
       <div class=prow style=margin-top:6px><span class=tag id=st_status></span></div>
     </div>
@@ -1096,7 +1131,7 @@ label.chk input{padding:0;accent-color:var(--acc)}
         <div class=tile title="Total round-trip — from audio sent to the reply finishing"><div class=k>total time</div><div class=v id=t_total>—</div></div>
         <div class=tile title="Time to the first generated word (time-to-first-token)"><div class=k>to first word</div><div class=v id=t_ttft>—</div></div>
         <div class=tile title="Generation speed — words (tokens) per second"><div class=k>words / sec</div><div class=v id=t_tps>—</div></div>
-        <div class=tile title="Time until the first speech audio is ready to play"><div class=k>to first sound</div><div class=v id=t_fa>—</div></div>
+        <div class=tile title="From the visitor stopping talking to George's first sound, timed the same way on every link (HTTP: the robot VAD's silence wait plus the round trip). Recent turns: /api/turns.csv"><div class=k>stop talking → sound</div><div class=v id=t_fa>—</div></div>
       </div>
       <svg id=diagram class=diagram viewBox="0 0 1080 410" preserveAspectRatio="xMidYMid meet"></svg>
       <div class=flowrow>
@@ -1213,7 +1248,7 @@ const LINKS_WS=[
 const CASC_LANE=430;   // x of the cascade transcript lane, in the gap left of the Gemma/ASR column
 const DIAG={mode:null,nodes:N,gw:['audio_decode','asr','llm','tts']};
 function build(mode){
-  const ws=mode==='ws', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
+  const ws=mode==='ws'||mode==='s2s', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
   DIAG.mode=mode; DIAG.nodes=NODES;
   DIAG.gw=ws?['vad','smart_turn','reopen_grace','asr','llm','tts']:['audio_decode','asr','llm','tts'];
   const cyN=n=>NODES[n].y+NODES[n].h/2, rxN=n=>NODES[n].x+NODES[n].w, cxN=n=>NODES[n].x+NODES[n].w/2;
@@ -1225,7 +1260,7 @@ function build(mode){
     E('marker',{id:'arr',viewBox:'0 0 12 12',refX:0,refY:6,markerWidth:12,markerHeight:12,markerUnits:'userSpaceOnUse',orient:'auto'},[E('path',{d:'M0 0 L12 6 L0 12 z',fill:'rgba(233,238,245,.6)'})])
   ]));
   svg.appendChild(E('rect',{class:'gwbox',x:284,y:86,width:336,height:300,rx:16}));
-  svg.appendChild(T(ws?'GATEWAY · /ws/converse · Silero VAD + Smart Turn · Gemma 4 E4B':'GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
+  svg.appendChild(T(mode==='s2s'?'REACHY BACKEND · /v1/realtime · speech-to-speech · Parakeet · Gemma 4 12B · Qwen3-TTS':ws?'GATEWAY · /ws/converse · Silero VAD + Smart Turn · Gemma 4 E4B':'GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
   const gtot=T(ws?'stop talking → first audio —':'round-trip Σ —',{class:'gwtotal',id:'gw_total',x:1042,y:404,'text-anchor':'end'});
   const gtt=document.createElementNS(SVGNS,'title');
   gtt.textContent=ws?'From the visitor going quiet to the first reply audio: the VAD endpoint wait + the gateway time to first audio (Smart Turn, the hold and Gemma overlap, so the stages are not simply added).'
@@ -1323,7 +1358,7 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
   if(sl)sl.textContent=casc?'reads transcript + sees':'reason + see';
   const secs=v=>(v==null)?'—':(+v).toFixed(1)+'s';
   node('cam','live'); node('detector','n='+(p.nfaces||0));
-  const gw=DIAG.gw, ws=DIAG.mode==='ws';
+  const gw=DIAG.gw, ws=DIAG.mode==='ws'||DIAG.mode==='s2s';
   const mx=Math.max(1,...gw.map(k=>comp[k]||0));
   gw.forEach(k=>{node(k,fmt(comp[k])); bar(k,(comp[k]||0)/mx);});
   const gt=$('gw_total'), spn=$('n_spk');
@@ -1334,7 +1369,7 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
     subt('smart_turn',stc?((stc.complete?'done ':'unfinished ')+(stc.probability!=null?'p='+(+stc.probability).toFixed(2):'')):'turn done?');
     if(!vadc)subt('vad','silero · end');
     const tfa=m.time_to_first_audio_ms;
-    if(gt)gt.textContent='stop talking → first audio '+(tfa!=null?fmt((ep||0)+tfa):'—');
+    if(gt)gt.textContent='stop talking → first audio '+(h.end_to_sound_ms!=null?fmt(h.end_to_sound_ms):(tfa!=null?fmt((ep||0)+tfa):'—'));
     const st=(ST&&ST.status)||{}, o=(ST&&ST.options)||{};
     const dly=st.echo_delay_ms!=null?st.echo_delay_ms:(ST&&ST.echo_delay_ms);
     node('mic',dly!=null?Math.round(dly)+'ms':secs(m.audio_seconds));
@@ -1352,11 +1387,11 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
   // Streamed mode: the robot only sees a turn once the gateway releases it (the
   // reply is prepared during the hold), so its own hops are near zero. Use the
   // gateway's figures, counted from the end of the visitor's speech.
-  const wsT=DIAG.mode==='ws', epT=(comp.endpoint||0);
+  const wsT=DIAG.mode==='ws'||DIAG.mode==='s2s', epT=(comp.endpoint||0);
   $('t_total').textContent=fmt(wsT&&m.total_ms!=null?epT+m.total_ms:h.total_ms);
   $('t_ttft').textContent=fmt(m.ttft_ms!=null?m.ttft_ms:h.first_token_ms);
   $('t_tps').textContent=m.tokens_per_sec?m.tokens_per_sec.toFixed(0):'—';
-  $('t_fa').textContent=fmt(wsT&&m.time_to_first_audio_ms!=null?epT+m.time_to_first_audio_ms
+  $('t_fa').textContent=h.end_to_sound_ms!=null?fmt(h.end_to_sound_ms):fmt(wsT&&m.time_to_first_audio_ms!=null?epT+m.time_to_first_audio_ms
                           :(h.first_audio_ms!=null?h.first_audio_ms:m.time_to_first_audio_ms));
   $('heard').textContent=t.heard||'—'; $('reply').textContent=t.reply||'—';
   if(s.has_image)$('lastimg').src='/last_image.jpg?t='+Math.floor(Date.now()/800);
@@ -1412,7 +1447,10 @@ function showStream(d){
   if(DIAG.mode!==d.options.transport)build(d.options.transport);   // diagram follows the link
   const o=d.options, gw=(d.status&&d.status.gateway)||{}, s=d.status||{};
   $('st_transport').value=o.transport;
-  $('st_ws').style.display=o.transport==='ws'?'':'none';
+  $('st_ws').style.display=o.transport!=='http'?'':'none';
+  $('st_gwtd').style.display=o.transport==='ws'?'':'none';
+  $('st_s2s').style.display=o.transport==='s2s'?'':'none';
+  if(document.activeElement!==$('st_s2s_url'))$('st_s2s_url').value=o.s2s_url||'';
   ST_BOOLS.forEach(k=>{$('st_'+k).checked=!!o[k];});
   ['mic_gain','aec_delay_ms'].forEach(k=>{ if(document.activeElement!==$('st_'+k))$('st_'+k).value=(o[k]==='auto'||o[k]==null)?'':o[k]; });
   const eff=k=>(k in o.vad)?o.vad[k]:((k in gw)?gw[k]:ST_DEF[k]);
@@ -1420,7 +1458,8 @@ function showStream(d){
     $('sv_'+k).textContent=eff(k)+((k in o.vad)?'':' · default');});
   $('sx_smart_turn').checked=!!eff('smart_turn');
   const bits=[];
-  if(o.transport==='ws'){
+  if(o.transport!=='http'){
+    if(o.transport==='s2s')bits.push(o.s2s_url?'Reachy backend':'⚠ set the Reachy backend address');
     bits.push(d.live?(s.connected?'streaming':'connecting…'):'idle until the next visitor');
     if(o.aec)bits.push('echo cancellation: '+(d.live?(s.aec||'starting'):(d.aec_backend?('ready ('+d.aec_backend+')'):'NOT AVAILABLE — start the aec service')));
     if(d.live)bits.push('barge-in '+(s.barge_in?'on':'off'+(o.barge_in?' (waiting for the echo delay)':'')));
@@ -1436,6 +1475,7 @@ function saveStream(body){ stBusy=true;
   fetch('/api/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{stBusy=false;showStream(d);}).catch(()=>{stBusy=false;}); }
 $('st_transport').onchange=()=>saveStream({transport:$('st_transport').value});
+$('st_s2s_url').onchange=()=>saveStream({s2s_url:$('st_s2s_url').value});
 ST_BOOLS.forEach(k=>{$('st_'+k).onchange=()=>saveStream({[k]:$('st_'+k).checked});});
 ['mic_gain','aec_delay_ms'].forEach(k=>{$('st_'+k).onchange=()=>saveStream({[k]:$('st_'+k).value});});
 let stT;

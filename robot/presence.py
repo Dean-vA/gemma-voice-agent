@@ -208,8 +208,12 @@ LLM_INPUT  = os.environ.get("PRESENCE_LLM_INPUT", "").strip().lower()
 # mic to the gateway's /ws/converse instead, which does the turn-taking (Silero
 # VAD + Smart Turn) and allows barge-in. See streaming.py and aec.py. All of it
 # is switchable live from the control centre.
+# "s2s" streams to the Reachy Mini's backend instead (Hugging Face
+# speech-to-speech, s2s/ and k8s/s2s.yaml in this repo), to compare the two
+# pipelines end to end on this robot: S2S_URL is its ws://host:port/v1/realtime.
 STREAM = {
-    "transport": os.environ.get("PRESENCE_TRANSPORT", "http").strip().lower(),   # http | ws
+    "transport": os.environ.get("PRESENCE_TRANSPORT", "http").strip().lower(),   # http | ws | s2s
+    "s2s_url": os.environ.get("PRESENCE_S2S_URL", "").strip(),
     # let the visitor talk over George (needs echo cancellation to be usable)
     "barge_in": os.environ.get("PRESENCE_BARGE_IN", "1").strip().lower() in ("1", "true", "yes", "on"),
     # remove George's own voice from the mic (aec.py)
@@ -1035,7 +1039,7 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
         files["image"] = ("frame.jpg", image_bytes, "image/jpeg")
 
     t0 = time.perf_counter()
-    _pub("turn", ev="start", phase=phase, session=sid,
+    _pub("turn", ev="start", phase=phase, session=sid, transport="http",
          image_jpeg=image_bytes, audio_bytes=len(wav_bytes),
          audio_secs=round(len(wav_bytes) / 2 / _RATE_16K, 2))
     marks = {"first_token": False, "first_audio": False}
@@ -1107,6 +1111,12 @@ def _converse_turn(audio_client, wav_bytes, image_bytes, instruction,
                                 marks["first_audio"] = True
                                 _pub("turn", ev="first_audio",
                                      ms=(time.perf_counter() - t0) * 1000)
+                                if phase == "converse":
+                                    # stop talking -> first sound, as the streamed links
+                                    # measure it: the robot VAD waited SILENCE_MS of
+                                    # silence before it sent the clip.
+                                    _pub("turn", ev="end_to_sound",
+                                         ms=SILENCE_MS + (time.perf_counter() - t0) * 1000)
                                 _pub("speaking", on=True)   # start playback animation
                             if not spoke["led"]:
                                 set_led(audio_client, 0, 80, 160)  # blue: speaking
@@ -1343,6 +1353,12 @@ class PresenceController(threading.Thread):
         self._last_face_t = time.time()            # for the goodbye check
         _persona_instruction(self._session)        # persona -> this session's system prompt
         try:
+            if STREAM.get("transport") == "s2s" and self.vad.available:
+                # The whole visit over the Reachy backend: greeting, talk, goodbye.
+                self.last_seen = time.time()
+                if self._converse_streamed("s2s") != "unreachable":
+                    return
+                print("[presence] Reachy backend unreachable -> gateway (HTTP) for this visitor")
             self.set_led(self.audio, 200, 120, 0)          # amber: thinking
             frame = _grab_jpeg()
             print(f"[presence] new arrival -> greeting (session={self._session})")
@@ -1436,11 +1452,12 @@ class PresenceController(threading.Thread):
                 self.set_led(self.audio, 0, 60, 30)        # back to dim green
 
     # -- streamed (WebSocket) conversation ------------------------------------
-    def _converse_streamed(self):
-        """Hold the conversation over the gateway's /ws/converse: the mic is
-        streamed, the gateway decides when a turn ends, and the visitor can talk
-        over the reply. Returns why it ended: "left" (visitor walked away),
-        "stopped" (disarmed / switched back to HTTP) or "error"."""
+    def _converse_streamed(self, link="ws"):
+        """Hold the conversation over the gateway's /ws/converse (link "ws") or the
+        Reachy backend's /v1/realtime (link "s2s"): the mic is streamed, the server
+        decides when a turn ends, and the visitor can talk over the reply. Returns
+        why it ended: "left" (visitor walked away), "stopped" (disarmed / link
+        switched), "error", or "unreachable" (s2s: never connected)."""
         global STREAM_SESSION, STREAM_LAST_STATUS, _ECHO_DELAY_MS
         import streaming
         vad = self.vad
@@ -1455,9 +1472,12 @@ class PresenceController(threading.Thread):
 
         def opts():
             o = dict(STREAM)
-            o.update(instruction=_persona_instruction(self._session), transcribe=CONV_TRANSCRIBE,
-                     asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE,
-                     debug_prompt=LOG_PROMPTS)
+            if link == "s2s":   # the persona is that server's session instructions
+                o.update(instruction=_prompt("converse"))
+            else:
+                o.update(instruction=_persona_instruction(self._session), transcribe=CONV_TRANSCRIBE,
+                         asr_engine=ASR_ENGINE, llm_input=LLM_INPUT, tts_engine=TTS_ENGINE,
+                         debug_prompt=LOG_PROMPTS)
             if o.get("mic_gain") in (None, "", "auto"):
                 o["mic_gain"] = STREAM_ARRAY_GAIN if vad._open_src == "array" else 1.0
             return o
@@ -1507,17 +1527,41 @@ class PresenceController(threading.Thread):
         def keep_going():
             if left.is_set():
                 return "left"
-            if self._stop.is_set() or not self.enabled or STREAM.get("transport") != "ws":
+            if self._stop.is_set() or not self.enabled or STREAM.get("transport") != link:
                 return "stopped"
             return ""
 
-        url = ("wss://" if GEMMA_URL.startswith("https") else "ws://") + GEMMA_URL.split("://", 1)[-1] + "/ws/converse"
-        session = streaming.StreamSession(
-            url, self._session, opts, _Mic, play, stop_playback,
-            lambda wav: self.wav_to_pcm16k(_wav_path(wav), self.gain),
-            pub=_pub, grab_image=_grab_jpeg,
-            set_led=lambda r, g, b: self.set_led(self.audio, r, g, b),
-            drain_pad=SPEAK_DRAIN_PAD, echo_delay_ms=_ECHO_DELAY_MS, on_prompt=_log_prompt)
+        common = dict(pub=_pub, set_led=lambda r, g, b: self.set_led(self.audio, r, g, b),
+                      drain_pad=SPEAK_DRAIN_PAD, echo_delay_ms=_ECHO_DELAY_MS)
+        if link == "s2s":
+            url = STREAM.get("s2s_url") or ""
+            if not url:
+                print("[presence] no Reachy backend address (PRESENCE_S2S_URL / control centre)")
+                vad._close_stream()
+                return "unreachable"
+
+            def goodbye():
+                gone = time.time() - self._last_face_t
+                if gone > GOODBYE_MAX_SECS:
+                    print(f"[presence] visitor already gone (last seen {gone:.0f}s ago) -> no goodbye")
+                    return None
+                return _prompt("goodbye")
+
+            def wave():
+                if WAVE_ON_LEAVE and self.arm is not None:
+                    threading.Thread(target=self._wave, daemon=True).start()
+
+            # No camera on that server: say so, rather than have it describe a scene.
+            greeting = _prompt("greet") + " (You cannot see anything right now; don't describe what you see.)"
+            session = streaming.S2SSession(
+                url, self._session, opts, _Mic, play, stop_playback, gain=lambda: self.gain,
+                greeting=greeting, goodbye=goodbye, on_goodbye=wave, **common)
+        else:
+            url = ("wss://" if GEMMA_URL.startswith("https") else "ws://") + GEMMA_URL.split("://", 1)[-1] + "/ws/converse"
+            session = streaming.StreamSession(
+                url, self._session, opts, _Mic, play, stop_playback,
+                lambda wav: self.wav_to_pcm16k(_wav_path(wav), self.gain),
+                grab_image=_grab_jpeg, on_prompt=_log_prompt, **common)
         STREAM_SESSION = session
         print(f"[presence] streamed conversation over {url}")
         threading.Thread(target=watch, daemon=True).start()
@@ -1532,6 +1576,8 @@ class PresenceController(threading.Thread):
                 _ECHO_DELAY_MS = session.status["echo_delay_ms"]
         if reason == "left":
             print("[presence] person left mid-conversation")
+        if link == "s2s" and reason == "error" and not session.status.get("ever_connected"):
+            return "unreachable"
         return reason
 
     # -- goodbye + wave -------------------------------------------------------

@@ -41,7 +41,7 @@ G1 head speaker ◀─ DDS PlayStream ◀──┴──────────
 | `presence.py` | Face detection, VAD, greet → converse → goodbye state machine |
 | `control_center.py` | In-process Flask control centre (single-page UI embedded) |
 | `usb_cam.py`, `usb_mic.py` | Camera handle, USB mic discovery |
-| `streaming.py` | Experimental streamed (WebSocket) conversation mode with barge-in; see `CONTROL_CENTRE.md` §11 |
+| `streaming.py` | Experimental streamed (WebSocket) conversation mode with barge-in; see `CONTROL_CENTRE.md` §11. Also the link to the Reachy backend (`S2SSession`) |
 | `aec.py`, `aec_server.py`, `Dockerfile.aec` | Echo cancellation for that mode (GStreamer `webrtcdsp`, run as a sidecar container) |
 | `converse_mode.py` | `/converse` client used by F1 push-to-talk |
 | `prompts.json` | Prompt presets (greet / converse / goodbye); edited live from the UI |
@@ -119,6 +119,19 @@ from the control centre.
 | `PRESENCE_ARRAY_ONSET_BOOST` | `1.5` | extra threshold factor for the mic array |
 | `PRESENCE_TRANSCRIBE` | `1` | show what the robot heard (extra Gemma call) |
 | `PRESENCE_WAVE` | `1` | wave on goodbye |
+| `PRESENCE_TRANSPORT` | `http` | conversation link: `http`, `ws` (gateway, streamed) or `s2s` (the Reachy backend) |
+| `PRESENCE_S2S_URL` | — | the Reachy backend for `s2s`, e.g. `ws://<node>:32740/v1/realtime` |
+
+## Comparing with the Reachy backend
+
+The control centre's *Conversation link* can send a visitor's whole conversation (greeting,
+talk, goodbye) through the Reachy Mini's backend instead of the gateway: Hugging Face
+speech-to-speech with Parakeet, Gemma 4 12B and Qwen3-TTS, deployed from `s2s/` (see
+`s2s/README.md`). Echo cancellation, the near-field gate and the barge-in hold-off stay on the
+robot, as for the streamed gateway link. The *stop talking → sound* tile is timed the same way
+on every link, and `/api/turns.csv` lists recent turns with the link each used. That server has
+no camera, so George is told he can't see on that link. If it can't be reached, the visitor
+gets the HTTP gateway loop.
 
 The full list, with the reasoning behind each value, is in `CONTROL_CENTRE.md`
 §7 and `PRESENCE_VAD.md`.
