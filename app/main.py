@@ -229,7 +229,9 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     llm_text, transcribed = await _hear(samples, instruction, timer, state, transcribe=transcribe,
                                         asr_engine=asr_engine, llm_input=llm_input)
     if transcribed:
-        yield "transcript", {"text": state.user_text}
+        # _hear falls back to the instruction when nothing was recognised; that
+        # isn't what the user said (it can be the barge-in note), so don't show it.
+        yield "transcript", {"text": "" if state.user_text == instruction else state.user_text}
 
     tts: TTSClient | None = _pick_tts(engine) if speak else None
     buffer = ""
