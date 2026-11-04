@@ -120,7 +120,7 @@ from the control centre.
 | `PRESENCE_TRANSCRIBE` | `1` | show what the robot heard (extra Gemma call) |
 | `PRESENCE_WAVE` | `1` | wave on goodbye |
 | `PRESENCE_TRANSPORT` | `http` | conversation link: `http`, `ws` (gateway, streamed) or `s2s` (the Reachy backend) |
-| `PRESENCE_S2S_URL` | — | the Reachy backend for `s2s`, e.g. `ws://<node>:32740/v1/realtime` |
+| `PRESENCE_S2S_URL` | — | the Reachy backend for `s2s`, e.g. `ws://<node>:30740/v1/realtime` |
 
 ## Comparing with the Reachy backend
 

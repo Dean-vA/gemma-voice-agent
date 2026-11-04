@@ -1059,8 +1059,8 @@ label.chk input{padding:0;accent-color:var(--acc)}
         </select>
       </div>
       <div class=prow id=st_s2s style=margin-top:8px>
-        <label for=st_s2s_url title="The Reachy backend's realtime WebSocket, e.g. ws://host:32740/v1/realtime. Greeting, conversation and goodbye all go through it.">backend</label>
-        <input id=st_s2s_url type=text placeholder="ws://host:32740/v1/realtime" style=flex:1>
+        <label for=st_s2s_url title="The Reachy backend's realtime WebSocket, e.g. ws://host:30740/v1/realtime. Greeting, conversation and goodbye all go through it.">backend</label>
+        <input id=st_s2s_url type=text placeholder="ws://host:30740/v1/realtime" style=flex:1>
       </div>
       <div id=st_ws>
         <div class=prow style=margin-top:8px>

@@ -30,11 +30,9 @@ One container, one GPU (about 22 GB used): `Dockerfile` starts what `backend.py`
 Windows, in the same way. The image is `ghcr.io/dean-va/s2s-backend`, built and pushed by
 `.github/workflows/s2s-images.yml` (on pushes to main or `feat/s2s-backend`, or by hand).
 
-- **Portainer stack on "Student apps (cluster)":** `portainer-s2s.yml` at the repo root. That
-  environment is a Swarm API in front of the adsai-rke2 cluster, so the stack publishes a
-  node port and asks for the GPU as a Swarm generic resource. The G1 connects to
-  `ws://<node>:32740/v1/realtime`.
-- **Kubernetes directly:** `k8s/s2s.yaml`, same address.
+- **adsai-rke2:** `k8s/s2s.yaml`, as a Git-managed Kubernetes stack in Portainer, namespace
+  `apps`. The G1 connects to `ws://<node>:30740/v1/realtime`. (Not as a stack on "Student
+  apps (cluster)": that Swarm front end gives Swarm services no GPU.)
 - **A plain Docker host, or locally:** `docker compose -f s2s/docker-compose.yml up --build`;
   the G1 connects to `ws://<host>:2740/v1/realtime`.
 

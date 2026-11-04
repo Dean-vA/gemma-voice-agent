@@ -1,5 +1,4 @@
-# The Reachy speech pipeline on a plain Docker host, or locally. (For "Student apps (cluster)"
-# use portainer-s2s.yml at the repo root; for Kubernetes, k8s/s2s.yaml.)
+# The Reachy speech pipeline on a plain Docker host, or locally. (For the cluster: k8s/s2s.yaml.)
 #
 #   docker compose -f s2s/docker-compose.yml up --build
 #

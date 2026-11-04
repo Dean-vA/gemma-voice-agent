@@ -110,7 +110,7 @@ services:
       #   http = one utterance per request, on-robot VAD (default)
       #   ws   = streamed to the gateway, which does VAD / Smart Turn / barge-in
       - PRESENCE_TRANSPORT=${PRESENCE_TRANSPORT:-http}   # http | ws | s2s
-      # the Reachy backend for PRESENCE_TRANSPORT=s2s (k8s/s2s.yaml), e.g. ws://<node>:32740/v1/realtime
+      # the Reachy backend for PRESENCE_TRANSPORT=s2s (k8s/s2s.yaml), e.g. ws://<node>:30740/v1/realtime
       - PRESENCE_S2S_URL=${PRESENCE_S2S_URL:-}
       - PRESENCE_BARGE_IN=${PRESENCE_BARGE_IN:-1}
       - PRESENCE_AEC=${PRESENCE_AEC:-1}                       # echo cancellation (needs the aec service)

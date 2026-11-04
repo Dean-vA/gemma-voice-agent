@@ -3,10 +3,13 @@
 # Windows for the Reachy Mini: llama.cpp (Gemma 4 12B), speaker-aware transcription (Parakeet +
 # TitaNet) and the speech server (speech-to-speech + Qwen3-TTS). See s2s/README.md.
 #
-# Deploy in Portainer: adsai-rke2 > Applications > Create from manifest (or from this repo,
-# path k8s/s2s.yaml), into a namespace of your choice. The image comes from GHCR, built by
-# .github/workflows/s2s-images.yml. The G1 connects to ws://<any node>:32740/v1/realtime.
-# If the cluster's GPU nodes need it, uncomment runtimeClassName: nvidia.
+# Deployed in Portainer as a Git-managed Kubernetes stack on adsai-rke2, namespace "apps"
+# (path k8s/s2s.yaml). The image comes from GHCR, built by .github/workflows/s2s-images.yml.
+# The G1 connects to ws://<any node>:30740/v1/realtime. A node port must lie in the
+# namespace's block (labels buas.nl/port-block-start/end: 30000-32699 for "apps").
+#
+# Not as a stack on "Student apps (cluster)": that Swarm front end (portainer/d2k) gives
+# Swarm services no GPU, only containers started with --gpus.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -32,7 +35,7 @@ spec:
   template:
     metadata: { labels: { app: s2s } }
     spec:
-      # runtimeClassName: nvidia
+      runtimeClassName: nvidia
       containers:
         - name: backend
           image: ghcr.io/dean-va/s2s-backend:latest
@@ -63,4 +66,4 @@ metadata: { name: s2s-backend, labels: { app: s2s } }
 spec:
   type: NodePort
   selector: { app: s2s }
-  ports: [{ port: 8765, targetPort: 8765, nodePort: 32740 }]
+  ports: [{ port: 8765, targetPort: 8765, nodePort: 30740 }]
