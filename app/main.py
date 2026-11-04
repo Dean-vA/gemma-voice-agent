@@ -151,25 +151,65 @@ def _decode(audio_bytes: bytes) -> tuple[DecodedAudio, TurnTimer]:
 
 
 async def _hear(samples, instruction: str, timer: TurnTimer, state: TurnState, *,
-                transcribe: bool, asr_engine: str, llm_input: str) -> tuple[str | None, bool]:
+                transcribe: bool, asr_engine: str,
+                llm_input: str) -> tuple[str | None, asyncio.Task[None] | None]:
     """Work out what the user said, as far as this turn needs to know it.
 
-    Sets ``state.user_text`` and returns ``(llm_text, transcribed)``:
-    ``llm_text`` is the transcript to send to the LLM in place of the audio
-    (cascade mode), or None when the LLM should hear the audio itself.
+    Returns ``(llm_text, heard)``. ``llm_text`` is the transcript to send to the
+    LLM in place of the audio (cascade mode), or None when the LLM should hear
+    the audio itself. ``heard`` is None when no transcript is wanted; otherwise
+    a task that sets ``state.user_text`` (to the instruction when nothing was
+    recognised). Until it finishes, ``state.user_text`` is the instruction.
+
+    When Gemma hears the audio itself, the transcript is only for showing and
+    storing, so it runs alongside the reply instead of before it and no longer
+    delays the first word. Callers use ``_heard`` / ``_drop`` below.
     """
     mode = (llm_input or app.state.settings.llm_input).lower()
     cascade = mode == "transcript"
     timer.m.llm_input = "transcript" if cascade else "audio"
     state.user_text = instruction
     if not (cascade or transcribe):
-        return None, False
+        return None, None
     # A cascade is only as fast as its ASR, so it defaults to Parakeet.
-    text = await _transcribe(samples, timer, asr_engine or ("parakeet" if cascade else ""))
-    state.user_text = text or instruction
-    if cascade and not text:
+    engine = _asr_engine(asr_engine or ("parakeet" if cascade else ""))
+    recognised: list[str] = []
+
+    async def _listen() -> None:
+        try:
+            text = await _transcribe(samples, timer, engine)
+        except Exception:
+            if cascade:
+                raise
+            log.exception("transcription failed; the reply goes on without it")
+            text = ""
+        recognised.append(text)
+        state.user_text = text or instruction
+
+    heard = asyncio.create_task(_listen())
+    # A cascade's reply is made from the transcript. The in-process Transformers
+    # model can't run two generations at once either, so with Gemma transcribing
+    # there the two still run one after the other.
+    if cascade or (engine == "gemma" and app.state.backend.name != "vllm"):
+        await heard
+    if not cascade:
+        return None, heard
+    if not recognised[0]:
         timer.m.llm_input = "audio"  # nothing recognised: let Gemma listen instead
-    return (text or None) if cascade else None, True
+    return recognised[0] or None, heard
+
+
+async def _heard(heard: asyncio.Task[None] | None) -> None:
+    """Wait for the turn's transcript, if one was asked for."""
+    if heard is not None:
+        await heard
+
+
+def _drop(heard: asyncio.Task[None] | None) -> None:
+    """Stop a transcript nobody will read (the turn ended early), so it can't
+    overwrite ``state.user_text`` of a later attempt at the same turn."""
+    if heard is not None and not heard.done():
+        heard.cancel()
 
 
 async def _stream_reply(session_id: str, samples, instruction: str, timer: TurnTimer,
@@ -226,12 +266,52 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     state = state if state is not None else TurnState()
     if debug_prompt:
         state.prompt = []
-    llm_text, transcribed = await _hear(samples, instruction, timer, state, transcribe=transcribe,
-                                        asr_engine=asr_engine, llm_input=llm_input)
-    if transcribed:
+    llm_text, heard = await _hear(samples, instruction, timer, state, transcribe=transcribe,
+                                  asr_engine=asr_engine, llm_input=llm_input)
+    try:
+        async for item in _reply_events(session_id, samples, instruction, timer, state, heard,
+                                        llm_text=llm_text, speak=speak, engine=engine,
+                                        image_bytes=image_bytes):
+            yield item
+    finally:
+        _drop(heard)
+
+    reply = state.reply
+    # finish() aggregates the per-call TTS timings and resolves the engine
+    # name from the X-Engine header, so no extra health round-trip is needed.
+    metrics = timer.finish(output_tokens=_approx_tokens(reply))
+    if commit:
+        # _hear falls back to the instruction when nothing was transcribed; a
+        # user_note says what really happened (e.g. a greeting from silence),
+        # so it wins over that fallback.
+        if user_note and (not state.user_text or state.user_text == instruction):
+            state.user_text = user_note
+        commit_turn(session_id, state, samples, image_bytes)
+    done = {"reply": reply, "metrics": metrics.as_dict()}
+    if state.prompt is not None:
+        done["prompt"] = state.prompt
+    yield "done", done
+
+
+async def _reply_events(session_id: str, samples, instruction: str, timer: TurnTimer,
+                        state: TurnState, heard: asyncio.Task[None] | None, *, llm_text: str | None,
+                        speak: bool, engine: str, image_bytes: bytes | None):
+    """The ``transcript``, ``token`` and ``audio`` events of one turn.
+
+    The transcript goes out as soon as it is ready, which is often after the
+    first words of the reply, and at the latest once the reply is complete.
+    """
+    shown = heard is None
+
+    def _transcript():
+        nonlocal shown
+        shown = True
         # _hear falls back to the instruction when nothing was recognised; that
         # isn't what the user said (it can be the barge-in note), so don't show it.
-        yield "transcript", {"text": "" if state.user_text == instruction else state.user_text}
+        return "transcript", {"text": "" if state.user_text == instruction else state.user_text}
+
+    if not shown and heard.done():
+        yield _transcript()
 
     tts: TTSClient | None = _pick_tts(engine) if speak else None
     buffer = ""
@@ -250,6 +330,8 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
                          "server_ms": round(t["server_ms"], 1) if "server_ms" in t else None}
 
     async for chunk in _stream_reply(session_id, samples, instruction, timer, state, image_bytes, llm_text):
+        if not shown and heard.done():
+            yield _transcript()
         yield "token", {"text": chunk}
         if tts is None:
             continue
@@ -265,21 +347,9 @@ async def turn_events(session_id: str, samples, instruction: str, timer: TurnTim
     if tts is not None and tail:
         yield await _speak(idx, tail)
 
-    reply = state.reply
-    # finish() aggregates the per-call TTS timings and resolves the engine
-    # name from the X-Engine header, so no extra health round-trip is needed.
-    metrics = timer.finish(output_tokens=_approx_tokens(reply))
-    if commit:
-        # _hear falls back to the instruction when nothing was transcribed; a
-        # user_note says what really happened (e.g. a greeting from silence),
-        # so it wins over that fallback.
-        if user_note and (not state.user_text or state.user_text == instruction):
-            state.user_text = user_note
-        commit_turn(session_id, state, samples, image_bytes)
-    done = {"reply": reply, "metrics": metrics.as_dict()}
-    if state.prompt is not None:
-        done["prompt"] = state.prompt
-    yield "done", done
+    await _heard(heard)
+    if not shown:
+        yield _transcript()
 
 
 async def _read_image(image: UploadFile | None) -> bytes | None:
@@ -302,11 +372,14 @@ async def chat(audio: UploadFile, session_id: str = Form(None), instruction: str
     image_bytes = await _read_image(image)
     decoded, timer = _decode(audio_bytes)
     state = TurnState()
-    llm_text, _ = await _hear(decoded.samples, instruction, timer, state, transcribe=transcribe,
-                              asr_engine=asr_engine, llm_input=llm_input)
-
-    async for _ in _stream_reply(sid, decoded.samples, instruction, timer, state, image_bytes, llm_text):
-        pass
+    llm_text, heard = await _hear(decoded.samples, instruction, timer, state, transcribe=transcribe,
+                                  asr_engine=asr_engine, llm_input=llm_input)
+    try:
+        async for _ in _stream_reply(sid, decoded.samples, instruction, timer, state, image_bytes, llm_text):
+            pass
+        await _heard(heard)
+    finally:
+        _drop(heard)
 
     reply = state.reply
     metrics = timer.finish(output_tokens=_approx_tokens(reply))
