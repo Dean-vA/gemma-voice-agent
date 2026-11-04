@@ -10,6 +10,21 @@
 #
 # Not as a stack on "Student apps (cluster)": that Swarm front end (portainer/d2k) gives
 # Swarm services no GPU, only containers started with --gpus.
+#
+# GPU: the "apps" namespace's own KAI queue (apps-default) only reaches aiserver4, so this
+# brings a queue of its own in the "lambda" node pool (RTX 6000 Ada / L40S nodes), as the
+# gpu-grader stack does: one GPU guaranteed, one at most.
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: g1-s2s
+  labels: { kai.scheduler/node-pool: lambda }
+spec:
+  resources:
+    gpu: { quota: 1, limit: 1, overQuotaWeight: 1 }
+    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
+    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -33,7 +48,11 @@ spec:
   strategy: { type: Recreate }
   selector: { matchLabels: { app: s2s } }
   template:
-    metadata: { labels: { app: s2s } }
+    metadata:
+      labels:
+        app: s2s
+        kai.scheduler/queue: g1-s2s           # the queue above, not the namespace's apps-default
+        kai.scheduler/node-pool: lambda
     spec:
       runtimeClassName: nvidia
       containers:
