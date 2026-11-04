@@ -86,6 +86,9 @@ def wait_until_up(process: subprocess.Popen[bytes] | None, url: str, what: str, 
     """Wait for a service to answer. `process` is None for one this script didn't start (a container)."""
     while True:
         if process is not None and process.poll() is not None:
+            if log is not None and log.exists():  # in a container nobody reads the file: show its end
+                tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
+                print("\n".join(f"  {line}" for line in tail), flush=True)
             raise SystemExit(f"{what} exited during startup; see {log or 'its output above'}.")
         try:
             urllib.request.urlopen(url, timeout=2)

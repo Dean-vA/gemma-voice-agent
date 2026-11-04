@@ -39,13 +39,18 @@ RUN uv venv --python 3.12 /opt/speech && \
         torch==2.11.0+cu128 torchaudio==2.11.0+cu128 -r /tmp/requirements.txt && \
     /opt/speech/bin/python -c "import nltk; [nltk.download(p, download_dir='$NLTK_DATA') for p in ('punkt_tab', 'averaged_perceptron_tagger_eng')]"
 
+# llama-server finds its libraries (libllama-server-impl.so and the ggml backends) next to it
+# only when started from /app, the base image's working directory; ours is /srv.
+RUN printf '#!/bin/sh\nexport LD_LIBRARY_PATH=/app${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\nexec /app/llama-server "$@"\n' \
+        > /usr/local/bin/llama-server && chmod +x /usr/local/bin/llama-server
+
 COPY s2s/app/ /srv/
 WORKDIR /srv
 
 # Where backend.py finds each part (on Windows these are its own paths). Nobody is enrolled,
 # so the transcript never names a speaker. Logs (table log, llama.cpp) go to /srv/logs.
 ENV BACKEND_STT_PYTHON=/opt/stt/bin/python \
-    BACKEND_LLAMA_SERVER=/app/llama-server \
+    BACKEND_LLAMA_SERVER=/usr/local/bin/llama-server \
     BACKEND_LLM_LOG=/srv/logs/llama.log \
     SPEAKER_ID_DATA=/srv/voices
 RUN mkdir -p /srv/logs /srv/voices
