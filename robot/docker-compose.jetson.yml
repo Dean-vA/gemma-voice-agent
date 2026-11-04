@@ -62,11 +62,14 @@ services:
       # USB cams renumber on re-enumeration (e.g. video6 -> video7 when the
       # RealSense grabs lower numbers); the by-id symlink always tracks the right
       # camera, and the container always sees it as /dev/video6 (CAM_DEV=6).
-      - "/dev/v4l/by-id/usb-CyberTrack_H3_CyberTrack_H3-video-index0:/dev/video6"
+      # Without the CyberTrack, use the head camera: CAM_SOURCE=videohub
+      # CAM_HOST_DEV=/dev/null (the device mapping must still point at something).
+      - "${CAM_HOST_DEV:-/dev/v4l/by-id/usb-CyberTrack_H3_CyberTrack_H3-video-index0}:/dev/video6"
     environment:
       - G1_IFACE=${G1_IFACE:-eth0}
       - SEND_IMAGE=1
       - CAM_DEV=6
+      - CAM_SOURCE=${CAM_SOURCE:-usb}   # usb | videohub (head RealSense via Unitree's video hub)
       - GEMMA_URL=${GEMMA_URL:?set GEMMA_URL to your gateway, e.g. http://<gateway-host>:2730}
       - PIPER_HTTP_URL=http://127.0.0.1:5000
       - SEND_TRANSCRIPT=${SEND_TRANSCRIPT:-0}

@@ -55,8 +55,9 @@ G1 head speaker ◀─ DDS PlayStream ◀──┴──────────
 
 - Docker with the `g1-greeter-shadow:latest` image (carries `unitree_sdk2py`,
   `cyclonedds`, `piper-tts`, `httpx`, `espeak-ng`).
-- A USB camera. The compose file maps a CyberTrack H3 by its stable
-  `/dev/v4l/by-id/...` path; change it for another camera.
+- A camera. The compose file maps a CyberTrack H3 USB camera by its stable
+  `/dev/v4l/by-id/...` path. Without it, use the head camera:
+  `CAM_SOURCE=videohub CAM_HOST_DEV=/dev/null`.
 - The robot must reach the gateway. The DDS side (speaker, arm, mic array) is on
   `eth0` (`192.168.123.x`); `network_mode: host` gives the client both.
 
@@ -112,6 +113,7 @@ from the control centre.
 | `GEMMA_URL` | required | gateway base URL |
 | `PRESENCE_WEB_PASSWORD` | required | control-centre password |
 | `PRESENCE_MIC` | `array` | mic source: `array` or `usb` |
+| `CAM_SOURCE` | `usb` | camera: `usb` (the CyberTrack) or `videohub` (the head RealSense, read from Unitree's video hub over DDS; also set `CAM_HOST_DEV=/dev/null`) |
 | `PRESENCE_PROX_FRAC` | `0.18` | how close a face must be to greet (face width ÷ frame width) |
 | `PRESENCE_STAY_FRAC` / `PRESENCE_CONV_DISARM_SECS` | `0.12` / `5.0` | looser gate once a conversation is running |
 | `PRESENCE_SILENCE_MS` | `900` | pause that ends an utterance |
