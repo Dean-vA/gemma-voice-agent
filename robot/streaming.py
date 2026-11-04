@@ -769,6 +769,42 @@ class S2SSession(StreamSession):
         self._deaf = False                 # goodbye: the visitor has gone, hear nothing
         self._phase = "converse"
         self._said = threading.Event()     # a typed turn's reply has finished
+        self._stage = {}                   # when this turn's events arrived; see _stage_metrics
+
+    # ---- stage timings -----------------------------------------------------------
+    # The server sends no timings of its own, so they're read off when its events
+    # arrive here, from the end of the visitor's speech (as the robot sent it):
+    #   vad  speech end -> speech_stopped (its silence wait + the network)
+    #   asr  -> the transcript (Parakeet runs while the visitor speaks)
+    #   llm  -> response.created, which comes with the first sentence: Smart Turn's
+    #        wait and Gemma's first sentence together, not separable from here
+    #   tts  -> the first audio (Qwen3-TTS); buffer_ms is how long the robot then
+    #        collects audio (FIRST_CLIP_S) before the first sound
+    def _stage_metrics(self) -> dict:
+        st, end = self._stage, self._speech_end_t
+        stop, heard, created, audio = (st.get(k) for k in ("stop", "heard", "created", "audio"))
+        ms = lambda a, b: round(max(0.0, b - a) * 1000, 1)
+        comps = []
+        if end is not None and stop is not None:
+            comps.append({"name": "vad", "ms": ms(end, stop)})
+        if stop is not None and heard is not None:
+            comps.append({"name": "asr", "ms": ms(stop, heard), "engine": "parakeet"})
+        if stop is not None and created is not None:
+            comps.append({"name": "llm", "ms": ms(max(stop, heard or stop), created)})
+        if created is not None and audio is not None:
+            tts = {"name": "tts", "ms": ms(created, audio)}
+            if st.get("sound") is not None:
+                tts["buffer_ms"] = ms(audio, st["sound"])
+            comps.append(tts)
+        # a cascade: Gemma reads Parakeet's transcript
+        return {"components": comps, "llm_input": "transcript"} if comps else {}
+
+    def _first_sound(self) -> None:
+        sounded = self._sounded
+        super()._first_sound()
+        if not sounded and self._stage.get("audio") is not None:
+            self._stage["sound"] = time.monotonic()
+            self.pub("turn", ev="metrics", metrics=self._stage_metrics())
 
     # ---- audio ---------------------------------------------------------------
     def _pcm_clip(self, pcm: bytes):
@@ -937,12 +973,15 @@ class S2SSession(StreamSession):
         elif kind == "input_audio_buffer.speech_stopped":
             self._speech_ended(ev.get("audio_end_ms"))
             self._turn_t0 = time.perf_counter()
+            self._stage = {"stop": time.monotonic()}
             self._heard, self._marks = "", set()
             self.pub("vad", phase="listening", voiced=False, active=True)
             self.pub("turn", ev="start", phase="converse", session=self.session_id, transport="s2s")
             self.set_led(200, 120, 0)       # amber: thinking
         elif kind == "conversation.item.input_audio_transcription.completed":
             self._heard = ev.get("transcript", "")
+            if "stop" in self._stage:
+                self._stage.setdefault("heard", time.monotonic())
             self.pub("turn", ev="heard", heard=self._heard)
             print(f"  heard: {self._heard!r}")
         elif kind == "response.created":
@@ -951,7 +990,9 @@ class S2SSession(StreamSession):
             self._reply_text, self._buf = [], bytearray()
             if self._phase != "converse" or self._turn_t0 is None:
                 self._turn_t0 = time.perf_counter()     # a typed turn: no speech to time from
-                self._marks = set()
+                self._marks, self._stage = set(), {}
+            elif "stop" in self._stage:
+                self._stage.setdefault("created", time.monotonic())
                 self.pub("turn", ev="start", phase=self._phase, session=self.session_id, transport="s2s")
         elif kind == "response.output_audio_transcript.delta":
             # Each sentence's text arrives just before its sound.
@@ -967,6 +1008,8 @@ class S2SSession(StreamSession):
                 return
             reply["item"] = reply["item"] or ev.get("item_id")
             self._mark("first_audio")
+            if "created" in self._stage:
+                self._stage.setdefault("audio", time.monotonic())
             self._buf += base64.b64decode(ev.get("delta", ""))
             limit = self.FIRST_CLIP_S if reply["samples"] == 0 else self.CLIP_S
             if len(self._buf) >= limit * RATE * 2:
@@ -989,8 +1032,9 @@ class S2SSession(StreamSession):
             text = (reply or {}).get("text") or " ".join(self._reply_text)
             cut = reply is not None and (reply["cancelled"] or status not in (None, "completed"))
             total = (time.perf_counter() - self._turn_t0) * 1000 if self._turn_t0 else None
-            self.pub("turn", ev="done", metrics={}, heard=self._heard,
+            self.pub("turn", ev="done", metrics=self._stage_metrics(), heard=self._heard,
                      reply=(text + " —") if cut and text else text, total_ms=total)
+            self._stage = {}
             print(f"[s2s] {self._phase}: {text!r}" + (" (cut)" if cut else ""))
             self._phase, self._turn_t0 = "converse", None
             self._said.set()

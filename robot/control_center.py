@@ -1230,6 +1230,22 @@ const N_WS=Object.assign({},N,{
     desc:"Hold — the reopen grace: the reply is held back briefly in case the visitor carries on talking. Gemma is already drafting the reply during the hold, so this overlaps the LLM time rather than adding to it."},
 });
 delete N_WS.audio_decode;
+// The Reachy backend: the same streamed stages, its own models. It sends no timings,
+// so the robot times its events as they arrive (streaming.py, S2SSession._stage_metrics).
+const N_S2S=Object.assign({},N_WS,{
+  vad:{...N_WS.vad,sub:'end + network',
+    desc:"VAD — the Reachy backend's Silero VAD closes the segment after 64 ms of silence. The time runs from the end of the visitor's speech, as the robot sent it, until the robot hears the segment closed: that silence plus the network both ways."},
+  smart_turn:{...N_WS.smart_turn,sub:'in Gemma time',
+    desc:"Smart Turn — speech-to-speech judges whether the visitor has finished. It reports nothing back, so its wait is inside the Gemma figure."},
+  reopen_grace:{...N_WS.reopen_grace,sub:'in Gemma time',
+    desc:"Hold — speech-to-speech's own wait for the visitor to carry on. Not reported back, so it is inside the Gemma figure."},
+  llm:{...N.llm,l:'Gemma 12B',sub:'turn wait + 1st sentence',
+    desc:"Gemma 4 12B (llama.cpp) — reads Parakeet's transcript (no camera) and writes the reply. The backend only announces a reply with its first sentence, so this is the turn-taking wait and the first sentence together, from the transcript."},
+  tts:{...N.tts,l:'Qwen3-TTS',sub:'first audio',
+    desc:"Qwen3-TTS — speaks the reply as streamed audio. The time runs from the first sentence to its first audio; the robot then collects 0.6 s of it before George's first sound (shown underneath)."},
+  asr:{...N.asr,l:'Parakeet',sub:'transcript',
+    desc:"Parakeet — transcribes while the visitor speaks, so the transcript follows the end of speech closely. Gemma answers from it."},
+});
 const LINKS_WS=[
   {a:'cam',b:'detector',v:1},
   {a:'detector',b:'mic',v:1,arm:1,lbl:'arm'},
@@ -1248,7 +1264,7 @@ const LINKS_WS=[
 const CASC_LANE=430;   // x of the cascade transcript lane, in the gap left of the Gemma/ASR column
 const DIAG={mode:null,nodes:N,gw:['audio_decode','asr','llm','tts']};
 function build(mode){
-  const ws=mode==='ws'||mode==='s2s', NODES=ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
+  const ws=mode==='ws'||mode==='s2s', NODES=mode==='s2s'?N_S2S:ws?N_WS:N, LNK=ws?LINKS_WS:LINKS;
   DIAG.mode=mode; DIAG.nodes=NODES;
   DIAG.gw=ws?['vad','smart_turn','reopen_grace','asr','llm','tts']:['audio_decode','asr','llm','tts'];
   const cyN=n=>NODES[n].y+NODES[n].h/2, rxN=n=>NODES[n].x+NODES[n].w, cxN=n=>NODES[n].x+NODES[n].w/2;
@@ -1260,7 +1276,7 @@ function build(mode){
     E('marker',{id:'arr',viewBox:'0 0 12 12',refX:0,refY:6,markerWidth:12,markerHeight:12,markerUnits:'userSpaceOnUse',orient:'auto'},[E('path',{d:'M0 0 L12 6 L0 12 z',fill:'rgba(233,238,245,.6)'})])
   ]));
   svg.appendChild(E('rect',{class:'gwbox',x:284,y:86,width:336,height:300,rx:16}));
-  svg.appendChild(T(mode==='s2s'?'REACHY BACKEND · /v1/realtime · speech-to-speech · Parakeet · Gemma 4 12B · Qwen3-TTS':ws?'GATEWAY · /ws/converse · Silero VAD + Smart Turn · Gemma 4 E4B':'GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
+  svg.appendChild(T(mode==='s2s'?'REACHY BACKEND · /v1/realtime · speech-to-speech':ws?'GATEWAY · /ws/converse · Silero VAD + Smart Turn · Gemma 4 E4B':'GATEWAY · Gemma 4 E4B · vLLM / RTX 6000',{class:'gwlabel',x:294,y:404}));
   const gtot=T(ws?'stop talking → first audio —':'round-trip Σ —',{class:'gwtotal',id:'gw_total',x:1042,y:404,'text-anchor':'end'});
   const gtt=document.createElementNS(SVGNS,'title');
   gtt.textContent=ws?'From the visitor going quiet to the first reply audio: the VAD endpoint wait + the gateway time to first audio (Smart Turn, the hold and Gemma overlap, so the stages are not simply added).'
@@ -1355,7 +1371,7 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
   const eng=(asrc&&asrc.engine)||(casc?'parakeet':(heardSel&&heardSel!=='off'?heardSel:''));
   $('diagram').classList.toggle('cascade',casc);
   if(sa)sa.textContent=eng?(eng+(casc?' · feeds Gemma':' · display only')):'off';
-  if(sl)sl.textContent=casc?'reads transcript + sees':'reason + see';
+  if(sl)sl.textContent=DIAG.mode==='s2s'?'turn wait + 1st sentence':casc?'reads transcript + sees':'reason + see';
   const secs=v=>(v==null)?'—':(+v).toFixed(1)+'s';
   node('cam','live'); node('detector','n='+(p.nfaces||0));
   const gw=DIAG.gw, ws=DIAG.mode==='ws'||DIAG.mode==='s2s';
@@ -1366,8 +1382,13 @@ es.onmessage=e=>{let s;try{s=JSON.parse(e.data)}catch(_){return}
     // streamed: endpoint wait + gateway time to first audio (the stages overlap)
     const ep=comp.endpoint, vadc=(m.components||[]).find(c=>c.name==='endpoint');
     const stc=(m.components||[]).find(c=>c.name==='smart_turn');
-    subt('smart_turn',stc?((stc.complete?'done ':'unfinished ')+(stc.probability!=null?'p='+(+stc.probability).toFixed(2):'')):'turn done?');
-    if(!vadc)subt('vad','silero · end');
+    if(DIAG.mode==='s2s'){
+      const ttc=(m.components||[]).find(c=>c.name==='tts');
+      subt('tts',ttc&&ttc.buffer_ms!=null?'+'+fmt(ttc.buffer_ms)+' robot buffer':'first audio');
+    }else{
+      subt('smart_turn',stc?((stc.complete?'done ':'unfinished ')+(stc.probability!=null?'p='+(+stc.probability).toFixed(2):'')):'turn done?');
+      if(!vadc)subt('vad','silero · end');
+    }
     const tfa=m.time_to_first_audio_ms;
     if(gt)gt.textContent='stop talking → first audio '+(h.end_to_sound_ms!=null?fmt(h.end_to_sound_ms):(tfa!=null?fmt((ep||0)+tfa):'—'));
     const st=(ST&&ST.status)||{}, o=(ST&&ST.options)||{};
