@@ -66,4 +66,5 @@ metadata: { name: s2s-backend, labels: { app: s2s } }
 spec:
   type: NodePort
   selector: { app: s2s }
-  ports: [{ port: 8765, targetPort: 8765, nodePort: 30740 }]
+  # The team policy checks the Service port too, so it carries the block port as well.
+  ports: [{ port: 30740, targetPort: 8765, nodePort: 30740 }]
