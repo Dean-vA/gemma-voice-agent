@@ -51,7 +51,9 @@ spec:
     metadata:
       labels:
         app: s2s
-        kai.scheduler/queue: g1-s2s           # the queue above, not the namespace's apps-default
+        # The cluster's kai-team-pods policy sets each pod's queue: from this label if present,
+        # else the namespace's (apps-default, which the lambda pool doesn't have).
+        buas.team: g1-s2s
         kai.scheduler/node-pool: lambda
     spec:
       runtimeClassName: nvidia
@@ -61,6 +63,10 @@ spec:
           imagePullPolicy: Always
           args:
             - --voice=A friendly young man with a clear, warm voice. He speaks at a relaxed, natural pace, upbeat and a little playful.
+          env:
+            # kai-team-pods: "inference" priority rather than build-preemptible, so a live
+            # robot conversation isn't evicted for a build job.
+            - { name: BUAS_PRIORITY, value: inference }
           ports: [{ containerPort: 8765 }]
           resources:
             limits: { nvidia.com/gpu: 1 }
