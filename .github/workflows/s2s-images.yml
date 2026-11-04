@@ -5,7 +5,7 @@ name: s2s images
 on:
   push:
     branches: [main, feat/s2s-backend]   # the feature branch too, so it can be tried before merging
-    paths: ["s2s/**", ".github/workflows/s2s-images.yml"]
+    paths: ["s2s/Dockerfile", "s2s/requirements.txt", "s2s/app/**"]   # what goes into the image
   workflow_dispatch:
 
 permissions:
