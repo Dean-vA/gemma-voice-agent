@@ -11,20 +11,10 @@
 # Not as a stack on "Student apps (cluster)": that Swarm front end (portainer/d2k) gives
 # Swarm services no GPU, only containers started with --gpus.
 #
-# GPU: the "apps" namespace's own KAI queue (apps-default) only reaches aiserver4, so this
-# brings a queue of its own in the "lambda" node pool (RTX 6000 Ada / L40S nodes), as the
-# gpu-grader stack does: one GPU guaranteed, one at most.
----
-apiVersion: scheduling.run.ai/v2
-kind: Queue
-metadata:
-  name: g1-s2s
-  labels: { kai.scheduler/node-pool: lambda }
-spec:
-  resources:
-    gpu: { quota: 1, limit: 1, overQuotaWeight: 1 }
-    cpu: { quota: -1, limit: -1, overQuotaWeight: 1 }
-    memory: { quota: -1, limit: -1, overQuotaWeight: 1 }
+# GPU: the cluster has one KAI shard per node. The pod picks its node with the
+# kai.scheduler/node-pool label (lambda-scalar-0: RTX A6000 / 6000 Ada). The cluster's
+# kai-team-pods policy then puts it in the platform queue of that node
+# (platform-lambda-scalar-0); this stack brings no queue of its own any more.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -51,10 +41,11 @@ spec:
     metadata:
       labels:
         app: s2s
-        # The cluster's kai-team-pods policy sets each pod's queue: from this label if present,
-        # else the namespace's (apps-default, which the lambda pool doesn't have).
-        buas.team: g1-s2s
-        kai.scheduler/node-pool: lambda
+        # Node shard to run in; kai-team-pods derives the queue from it.
+        kai.scheduler/node-pool: lambda-scalar-0
+        # Ask for protected (non-preemptible) capacity from the platform quota on that node,
+        # so a live robot conversation isn't evicted for borrowed work.
+        buas.nl/protect: "true"
     spec:
       runtimeClassName: nvidia
       containers:
