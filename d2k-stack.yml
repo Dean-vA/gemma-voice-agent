@@ -1,0 +1,63 @@
+# Gemma George on the BUas cluster, as a stack in the Portainer environment
+# "Student apps (cluster)" (D2K). It is the cluster version of
+# portainer-stack.yml: the same three services.
+#
+# Set HF_TOKEN in the stack's environment variables in Portainer, never here.
+#
+# GPU: each service asks for a slice of GPU memory with BUAS_GPU_MEMORY (MiB)
+# instead of a whole card. The cluster picks the node with the most free GPU
+# memory.
+#
+# Names: a service name is shared by the whole cluster namespace, so every
+# service carries the prefix "gemma-". A plain "vllm" or "tts" would clash
+# with another stack that uses the same name, and the deploy is then refused.
+#
+# Port: must be in 30000-32699. The app is at http://<any node>:30730
+version: "3.8"
+services:
+  gemma-llm:
+    image: ghcr.io/dean-va/gemma-vllm-audio:2026-09-01
+    command:
+      - --model=google/gemma-4-E4B-it-qat-w4a16-ct
+      - --served-model-name=gemma-4-e4b
+      - --port=8001
+      - --max-model-len=8192
+      - --max-num-seqs=8
+      # A share of the slice, not of the card: vLLM sees only the 16 GiB.
+      - --gpu-memory-utilization=0.90
+      - --enable-prefix-caching
+      - --async-scheduling
+    environment:
+      BUAS_GPU_MEMORY: "16384"
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+  gemma-tts:
+    image: ghcr.io/dean-va/gemma-tts-kokoro:2026-09-01
+    environment:
+      BUAS_GPU_MEMORY: "3072"
+      TTS_ENGINE: kokoro
+      HF_TOKEN: ${HF_TOKEN}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+  gemma-gateway:
+    image: ghcr.io/dean-va/gemma-gateway:2026-11-04
+    environment:
+      BUAS_GPU_MEMORY: "4096"
+      BACKEND: vllm
+      VLLM_BASE_URL: http://gemma-llm:8001/v1
+      QAT_MODEL_ID: google/gemma-4-E4B-it-qat-w4a16-ct
+      TTS_ENGINE: kokoro
+      # The gateway's default is http://tts-kokoro:8200, the Docker name.
+      TTS_ENGINES: '{"kokoro": "http://gemma-tts:8200"}'
+      MAX_HISTORY_TURNS: "8"
+      SYSTEM_PROMPT: "You are a friendly humanoid robot assistant. Reply in short, natural spoken sentences. Be concise and conversational."
+      HF_TOKEN: ${HF_TOKEN}
+    ports:
+      - "30730:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - asr-clips:/app/samples
+volumes:
+  hf-cache:
+  asr-clips:

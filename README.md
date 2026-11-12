@@ -71,32 +71,40 @@ a webcam frame, then hold-to-talk and ask about it (e.g. "what am I holding?"). 
 is sent with that turn only. No extra setup — the vLLM server already accepts an image
 alongside audio.
 
-## Run on Kubernetes (BUas cluster)
+## Run on the BUas cluster (D2K stack)
 
-`k8s/gemma-george.yaml` is the cluster version of `portainer-stack.yml`: the same
-three services (vLLM, Kokoro, gateway) as deployments in namespace `apps`. Each asks
-for a slice of GPU memory (annotation `gpu-memory`, in MiB) instead of a whole card:
-16 GiB for vLLM, 3 GiB for Kokoro, 4 GiB for the gateway.
+`d2k-stack.yml` is the cluster version of `portainer-stack.yml`: the same three
+services (vLLM, Kokoro, gateway), deployed as a stack in the Portainer environment
+**Student apps (cluster)**. That environment turns a compose stack into workloads on
+the Kubernetes cluster.
 
-```bash
-# once: the Hugging Face token (never in Git)
-kubectl create secret generic gemma-george-hf -n apps --from-literal=HF_TOKEN=<token>
-
-kubectl apply -f k8s/gemma-george.yaml
-```
-
-Then open `http://<any node>:30730`. The first vLLM start takes about 7 minutes
-(model download, then loading from the NFS cache).
+1. In Portainer, choose the environment *Student apps (cluster)* and add a stack named
+   `gemma-george` from `d2k-stack.yml`.
+2. Set `HF_TOKEN` in the stack's environment variables (never in Git).
+3. Deploy, then open `http://<any node>:30730`. The first vLLM start takes about
+   7 minutes (model download, then loading from the shared cache).
 
 Things that differ from the Docker stack:
 
-- The images are pulled from `ghcr.io/dean-va/` by tag; the cluster cannot use local
-  builds. After a rebuild, push a new tag and change it in the manifest.
-- `enableServiceLinks: false` is required. Without it Kubernetes sets `VLLM_PORT` for
-  the service named `vllm`, and vLLM stops at start-up.
+- **GPU slices, not cards.** Each service asks for GPU memory with the environment
+  variable `BUAS_GPU_MEMORY` (MiB): 16 GiB for vLLM, 3 GiB for Kokoro, 4 GiB for the
+  gateway. There is no `deploy.resources` block and no card number; the cluster picks
+  the node with the most free GPU memory. vLLM sees only its slice, so
+  `--gpu-memory-utilization=0.90` means 90 % of 16 GiB.
+- **Service names carry a prefix.** A service name is shared by everyone who deploys
+  to the cluster, so `vllm` became `gemma-llm` and `tts-kokoro` became `gemma-tts`.
+  A name that another stack already uses makes the deploy fail with
+  `DNS name "..." is already used`. The gateway finds the renamed services through
+  `VLLM_BASE_URL` and `TTS_ENGINES`.
+- **Images come from a registry.** They are pulled from `ghcr.io/dean-va/` by tag; the
+  cluster cannot use local builds. After a rebuild, push a new tag and change it in
+  the file.
+- **The published port must be in 30000-32699.**
+- **No health checks.** A service shows as running before its model has loaded; look
+  at the service log for `Application startup complete`.
 - The page is served over plain HTTP on a node port, which is not a secure context:
   the browser microphone and webcam need HTTPS or a tunnel to `localhost`
-  (`kubectl port-forward -n apps svc/gemma-george 8000:30730`).
+  (`kubectl port-forward -n apps svc/gemma-george-gemma-gateway-lb 8000:30730`).
 
 ## API (what the robot will call)
 
