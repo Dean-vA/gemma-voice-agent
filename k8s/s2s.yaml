@@ -1,5 +1,5 @@
 # The Reachy speech pipeline on Kubernetes (the adsai-rke2 cluster), for comparing with the
-# gateway: one pod, one GPU (about 22 GB used). The container runs what backend.py runs on
+# gateway: one pod on a 24 GiB slice of one GPU (about 22 GB used). The container runs what backend.py runs on
 # Windows for the Reachy Mini: llama.cpp (Gemma 4 12B), speaker-aware transcription (Parakeet +
 # TitaNet) and the speech server (speech-to-speech + Qwen3-TTS). See s2s/README.md.
 #
@@ -15,6 +15,11 @@
 # kai.scheduler/node-pool label (lambda-scalar-0: RTX A6000 / 6000 Ada). The cluster's
 # kai-team-pods policy then puts it in the platform queue of that node
 # (platform-lambda-scalar-0); this stack brings no queue of its own any more.
+#
+# It asks for GPU memory (BUAS_GPU_MEMORY, in MiB), not a whole card: KAI places it as a
+# fraction of a 48 GB card and the rest of the card stays free for other work. All three
+# processes allocate fixed amounts (llama.cpp 12B Q4 with 2 x 32k context, Parakeet +
+# TitaNet, Qwen3-TTS), about 16 GiB idle and 22 GB in a conversation; 24 GiB leaves room.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -58,9 +63,10 @@ spec:
             # kai-team-pods: "inference" priority rather than build-preemptible, so a live
             # robot conversation isn't evicted for a build job.
             - { name: BUAS_PRIORITY, value: inference }
+            # kai-team-pods: a 24 GiB slice of one card instead of a whole card.
+            - { name: BUAS_GPU_MEMORY, value: "24576" }
           ports: [{ containerPort: 8765 }]
           resources:
-            limits: { nvidia.com/gpu: 1 }
             requests: { cpu: "4", memory: 24Gi }
           volumeMounts:
             - { name: cache, mountPath: /root/.cache }
